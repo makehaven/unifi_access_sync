@@ -1,0 +1,6 @@
+{
+    "name": "makehaven/unifi_access_sync",
+    "type": "drupal-custom-module",
+    "description": "Synchronises active Door members from Drupal into UniFi Access for offline validation.",
+    "license": "GPL-2.0-or-later"
+}

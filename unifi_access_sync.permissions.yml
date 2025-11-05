@@ -1,0 +1,3 @@
+administer unifi access sync settings:
+  title: 'Administer UniFi Access Sync settings'
+  description: 'Configure UniFi Access API credentials and Door term mapping.'

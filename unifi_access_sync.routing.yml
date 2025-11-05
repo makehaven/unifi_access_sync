@@ -1,0 +1,7 @@
+unifi_access_sync.settings:
+  path: '/admin/config/system/unifi-access-sync'
+  defaults:
+    _form: '\Drupal\unifi_access_sync\Form\UnifiSettingsForm'
+    _title: 'UniFi Access Sync'
+  requirements:
+    _permission: 'administer unifi access sync settings'

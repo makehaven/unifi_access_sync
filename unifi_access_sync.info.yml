@@ -1,0 +1,10 @@
+name: 'UniFi Access Sync'
+type: module
+description: 'Syncs Door-permitted Drupal members to UniFi Access.'
+core_version_requirement: '^10 || ^11'
+package: 'MakeHaven'
+dependencies:
+  - drupal:system
+  - drupal:user
+  - drupal:node
+  - drupal:taxonomy

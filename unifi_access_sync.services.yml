@@ -1,0 +1,19 @@
+services:
+  logger.channel.unifi_access_sync:
+    class: Drupal\Core\Logger\LoggerChannel
+    factory: ['@logger.factory', 'get']
+    arguments: ['unifi_access_sync']
+
+  unifi_access_sync.api:
+    class: 'Drupal\unifi_access_sync\Service\UnifiApiService'
+    arguments: ['@http_client', '@config.factory', '@logger.channel.unifi_access_sync']
+
+  unifi_access_sync.sync_manager:
+    class: 'Drupal\unifi_access_sync\Service\UnifiSyncManager'
+    arguments: ['@entity_type.manager', '@config.factory', '@logger.channel.unifi_access_sync', '@unifi_access_sync.api']
+
+  # Drush command service
+  Drupal\unifi_access_sync\Commands\UnifiAccessSyncCommands:
+    arguments: ['@unifi_access_sync.sync_manager']
+    tags:
+      - { name: drush.command }

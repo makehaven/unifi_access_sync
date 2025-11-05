@@ -1,0 +1,73 @@
+<?php
+
+use Drupal\Core\Entity\EntityInterface;
+
+/**
+ * Implements hook_cron().
+ * Reconcile at most once per hour.
+ */
+function unifi_access_sync_cron() {
+  $state = \Drupal::state();
+  $last = (int) $state->get('unifi_access_sync.last_cron', 0);
+  $now = \Drupal::time()->getRequestTime();
+  if ($now - $last < 3600) {
+    return;
+  }
+  $state->set('unifi_access_sync.last_cron', $now);
+  /** @var \Drupal\unifi_access_sync\Service\UnifiSyncManager $mgr */
+  $mgr = \Drupal::service('unifi_access_sync.sync_manager');
+  $mgr->reconcile();
+}
+
+/**
+ * Implements hook_entity_insert().
+ */
+function unifi_access_sync_entity_insert(EntityInterface $entity) {
+  if ($entity->getEntityTypeId() === 'node' && $entity->bundle() === 'badge_request') {
+    _unifi_access_sync_consider_node($entity);
+  }
+}
+
+/**
+ * Implements hook_entity_update().
+ */
+function unifi_access_sync_entity_update(EntityInterface $entity) {
+  if ($entity->getEntityTypeId() === 'node' && $entity->bundle() === 'badge_request') {
+    _unifi_access_sync_consider_node($entity);
+  }
+}
+
+/**
+ * Handle targeted add/remove based on current node state.
+ */
+function _unifi_access_sync_consider_node(\Drupal\node\NodeInterface $node) {
+  $cfg = \Drupal::config('unifi_access_sync.settings');
+  $door_tid = (int) $cfg->get('door_term_id');
+  if (!$door_tid) return;
+
+  if (!$node->hasField('field_badge_requested') || !$node->hasField('field_badge_status') || !$node->hasField('field_member_to_badge')) {
+    return;
+  }
+
+  $requested_tid = (int) ($node->get('field_badge_requested')->target_id ?? 0);
+  if ($requested_tid !== $door_tid) return;
+
+  $status = trim((string) $node->get('field_badge_status')->value);
+  $should_have = strcasecmp($status, 'active') === 0;
+
+  $uid = (int) ($node->get('field_member_to_badge')->target_id ?? 0);
+  if (!$uid) return;
+
+  $user = \Drupal::entityTypeManager()->getStorage('user')->load($uid);
+  if (!$user) return;
+
+  $email = (string) $user->getEmail();
+  $name = trim(($user->get('field_first_name')->value ?? '') . ' ' . ($user->get('field_last_name')->value ?? ''));
+  if ($name === '') $name = $user->getDisplayName();
+
+  if ($email) {
+    /** @var \Drupal\unifi_access_sync\Service\UnifiSyncManager $mgr */
+    $mgr = \Drupal::service('unifi_access_sync.sync_manager');
+    $mgr->syncSingleByEmail($email, $should_have, $name);
+  }
+}

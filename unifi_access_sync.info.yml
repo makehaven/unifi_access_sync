@@ -2,9 +2,10 @@ name: 'UniFi Access Sync'
 type: module
 description: 'Syncs Door-permitted Drupal members to UniFi Access.'
 core_version_requirement: '^10 || ^11'
-package: 'MakeHaven'
+package: Makerspace
 dependencies:
   - drupal:system
   - drupal:user
   - drupal:node
   - drupal:taxonomy
+configure: unifi_access_sync.settings

@@ -33,13 +33,55 @@ class UnifiSettingsForm extends ConfigFormBase {
       '#required' => TRUE,
     ];
 
+    $form['use_key_module'] = [
+      '#type' => 'checkbox',
+      '#title' => $this->t('Use Key module for API Token'),
+      '#default_value' => $cfg->get('use_key_module') ?? FALSE,
+    ];
+
     $form['api_token'] = [
       '#type' => 'textfield',
       '#title' => $this->t('UniFi Access API Token'),
       '#description' => $this->t('Developer token with user read/write permissions.'),
       '#default_value' => $cfg->get('api_token') ?? '',
-      '#required' => TRUE,
+      '#states' => [
+        'visible' => [
+          ':input[name="use_key_module"]' => ['checked' => FALSE],
+        ],
+        'required' => [
+          ':input[name="use_key_module"]' => ['checked' => FALSE],
+        ],
+      ],
     ];
+
+    if (\Drupal::moduleHandler()->moduleExists('key')) {
+      $keys = \Drupal::service('key.repository')->getKeys();
+      $options = [];
+      foreach ($keys as $key) {
+        $options[$key->id()] = $key->label();
+      }
+
+      $form['api_key_id'] = [
+        '#type' => 'select',
+        '#title' => $this->t('UniFi Access API Key'),
+        '#description' => $this->t('Select the key containing the UniFi Access API Token.'),
+        '#options' => $options,
+        '#default_value' => $cfg->get('api_key_id') ?? '',
+        '#empty_option' => $this->t('- Select a Key -'),
+        '#states' => [
+          'visible' => [
+            ':input[name="use_key_module"]' => ['checked' => TRUE],
+          ],
+          'required' => [
+            ':input[name="use_key_module"]' => ['checked' => TRUE],
+          ],
+        ],
+      ];
+    }
+    else {
+      $form['use_key_module']['#disabled'] = TRUE;
+      $form['use_key_module']['#description'] = $this->t('Install the Key module to use this feature.');
+    }
 
     $form['verify_ssl'] = [
       '#type' => 'checkbox',
@@ -63,7 +105,9 @@ class UnifiSettingsForm extends ConfigFormBase {
 
     $this->configFactory()->getEditable(self::CONFIG_NAME)
       ->set('api_host', rtrim((string) $form_state->getValue('api_host'), '/'))
+      ->set('use_key_module', (bool) $form_state->getValue('use_key_module'))
       ->set('api_token', (string) $form_state->getValue('api_token'))
+      ->set('api_key_id', (string) $form_state->getValue('api_key_id'))
       ->set('verify_ssl', (bool) $form_state->getValue('verify_ssl'))
       ->set('door_term_id', $door_term_id)
       ->save();

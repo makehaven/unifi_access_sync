@@ -6,7 +6,7 @@ services:
 
   unifi_access_sync.api:
     class: 'Drupal\unifi_access_sync\Service\UnifiApiService'
-    arguments: ['@http_client', '@config.factory', '@logger.channel.unifi_access_sync']
+    arguments: ['@http_client', '@config.factory', '@logger.channel.unifi_access_sync', '@?key.repository']
 
   unifi_access_sync.sync_manager:
     class: 'Drupal\unifi_access_sync\Service\UnifiSyncManager'

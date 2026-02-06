@@ -14,3 +14,9 @@ unifi_access_sync.settings:
     door_term_id:
       type: integer
       label: 'Door taxonomy term ID'
+    use_key_module:
+      type: boolean
+      label: 'Use Key module for API token'
+    api_key_id:
+      type: string
+      label: 'Key ID from Key module'

@@ -5,8 +5,16 @@ namespace Drupal\unifi_access_sync\Commands;
 use Drush\Commands\DrushCommands;
 use Drupal\unifi_access_sync\Service\UnifiSyncManager;
 
+/**
+ * Drush commands for UniFi Access Sync.
+ */
 class UnifiAccessSyncCommands extends DrushCommands {
 
+  /**
+   * The sync manager service.
+   *
+   * @var \Drupal\unifi_access_sync\Service\UnifiSyncManager
+   */
   protected UnifiSyncManager $mgr;
 
   public function __construct(UnifiSyncManager $mgr) {
@@ -24,4 +32,5 @@ class UnifiAccessSyncCommands extends DrushCommands {
     $this->mgr->reconcile();
     $this->output()->writeln('Done.');
   }
+
 }

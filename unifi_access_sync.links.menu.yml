@@ -1,0 +1,6 @@
+unifi_access_sync.settings:
+  title: 'UniFi Access Sync'
+  description: 'Configure UniFi Access API and member sync settings.'
+  parent: system.admin_config_system
+  route_name: unifi_access_sync.settings
+  weight: 0

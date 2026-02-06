@@ -25,11 +25,19 @@ Syncs Drupal members (with an **active** "Door" permission) to **UniFi Access** 
 
 ## Configure
 
+### UniFi Console Setup
+1. Log in to your UniFi Console.
+2. Open the **UniFi Access** application.
+3. Navigate to **Settings** &rarr; **Control Plane** &rarr; **Integrations**.
+4. Generate a new API Token. Copy this immediately as it won't be shown again.
+5. Note the console IP/Hostname for the API Host field.
+
+### Drupal Module Setup
 Go to **Config → System → UniFi Access Sync** and set:
-- **API Host:** `https://<console-ip>:12445`
-- **API Token:** token with user read/write scopes
-- **Verify SSL:** uncheck if controller uses self-signed cert
-- **Door Term ID:** the taxonomy term ID representing **Door**
+- **API Host:** `https://<console-ip>` (e.g. `https://192.168.1.1`)
+- **API Token:** Paste the token generated above (sent as `X-API-KEY` header).
+- **Verify SSL:** Uncheck if using a self-signed certificate (common for local IPs).
+- **Door Term ID:** The taxonomy term ID representing the "Door" access level.
 
 ## Usage
 

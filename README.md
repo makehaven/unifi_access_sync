@@ -34,10 +34,15 @@ Syncs Drupal members (with an **active** "Door" permission) to **UniFi Access** 
 
 ### Drupal Module Setup
 Go to **Config → System → UniFi Access Sync** and set:
-- **API Host:** `https://<console-ip>` (e.g. `https://192.168.1.1`)
+- **API Host:** Enter **only the base URL** of your UniFi Console (e.g., `https://unifi.yourdomain.com` or `https://192.168.1.1`). **Do NOT include `/proxy/access/integration/v1/developer/users` or any other path segments.** This module will append the correct API paths automatically.
 - **API Token:** Paste the token generated above (sent as `X-API-KEY` header).
 - **Verify SSL:** Uncheck if using a self-signed certificate (common for local IPs).
 - **Door Term ID:** The taxonomy term ID representing the "Door" access level.
+
+### Important Notes on Resilience and Performance
+- **Asynchronous Processing:** All UniFi API calls (create/delete users) are now processed **asynchronously** via Drupal's Queue API. This prevents cron execution timeouts and improves site responsiveness. You can monitor the `unifi_access_sync_queue` via `drush queue:list` and process it with `drush queue:run unifi_access_sync_queue`.
+- **Improved Error Handling:** API communication errors are now more robustly handled and logged, providing clearer messages for troubleshooting.
+- **Troubleshooting:** If you encounter issues, check the `unifi_access_sync` log channel for detailed error messages. Ensure your `API Host` is correctly configured and accessible from your Drupal environment.
 
 ## Usage
 
@@ -65,5 +70,5 @@ Adapt these in code if yours differ.
 
 ## Notes
 
-- User creation payload uses `email` and `name`. Customize mapping in `UnifiSyncManager::userPayloadForEmail()` if you want first/last names from profiles.
+
 - This module **does not** perform unlocks. Pair with your webhook bridge for real-time decisions.

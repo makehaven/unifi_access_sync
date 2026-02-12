@@ -5,6 +5,7 @@ namespace Drupal\unifi_access_sync\Service;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Logger\LoggerChannelInterface;
+use Drupal\Core\Queue\QueueFactory;
 
 /**
  * Manages synchronization between Drupal badge_request nodes and UniFi Access.
@@ -31,6 +32,13 @@ class UnifiSyncManager {
    * @var \Drupal\Core\Logger\LoggerChannelInterface
    */
   private LoggerChannelInterface $log;
+
+  /**
+   * The queue factory.
+   *
+   * @var \Drupal\Core\Queue\QueueFactory
+   */
+  protected QueueFactory $queueFactory;
 
   /**
    * The UniFi API service.
@@ -60,11 +68,13 @@ class UnifiSyncManager {
     ConfigFactoryInterface $config_factory,
     LoggerChannelInterface $log,
     UnifiApiService $api,
+    QueueFactory $queue_factory,
   ) {
     $this->etm = $etm;
     $this->cfg = $config_factory->get('unifi_access_sync.settings');
     $this->log = $log;
     $this->api = $api;
+    $this->queueFactory = $queue_factory;
   }
 
   /**
@@ -82,19 +92,28 @@ class UnifiSyncManager {
     $should = $this->getShouldHaveAccessUserData();
     $have = $this->mapUnifiUsersByEmail();
 
+    $queue = $this->queueFactory->get('unifi_access_sync_queue');
+
     // Add missing.
     foreach ($should as $email => $data) {
       if (!isset($have[$email])) {
-        $payload = $this->userPayloadForData($email, $data);
-        $this->log->notice('Creating UniFi user @e', ['@e' => $email]);
-        $this->api->createUser($payload);
+        $this->log->notice('Queueing UniFi user creation for @e', ['@e' => $email]);
+        $queue->createItem([
+          'action' => 'create',
+          'email' => $email,
+          'user_data' => $data,
+        ]);
       }
     }
     // Remove extras.
     foreach ($have as $email => $user) {
       if (!isset($should[$email]) && !empty($user['id'])) {
-        $this->log->notice('Deleting UniFi user @e', ['@e' => $email]);
-        $this->api->deleteUser($user['id']);
+        $this->log->notice('Queueing UniFi user deletion for @e', ['@e' => $email]);
+        $queue->createItem([
+          'action' => 'delete',
+          'email' => $email,
+          'user_id' => $user['id'],
+        ]);
       }
     }
   }
@@ -110,13 +129,25 @@ class UnifiSyncManager {
    *   Optional user data (first_name, last_name).
    */
   public function syncSingleByEmail(string $email, bool $should_have, array $user_data = []): void {
+    $queue = $this->queueFactory->get('unifi_access_sync_queue');
     $have = $this->mapUnifiUsersByEmail();
     $exists = isset($have[$email]);
+
     if ($should_have && !$exists) {
-      $this->api->createUser($this->userPayloadForData($email, $user_data));
+      $this->log->notice('Queueing single UniFi user creation for @e', ['@e' => $email]);
+      $queue->createItem([
+        'action' => 'create',
+        'email' => $email,
+        'user_data' => $user_data,
+      ]);
     }
     elseif (!$should_have && $exists && !empty($have[$email]['id'])) {
-      $this->api->deleteUser($have[$email]['id']);
+      $this->log->notice('Queueing single UniFi user deletion for @e', ['@e' => $email]);
+      $queue->createItem([
+        'action' => 'delete',
+        'email' => $email,
+        'user_id' => $have[$email]['id'],
+      ]);
     }
   }
 
@@ -198,38 +229,6 @@ class UnifiSyncManager {
     return self::$userCache;
   }
 
-  /**
-   * Builds the API payload for creating a user.
-   *
-   * @param string $email
-   *   The user's email address.
-   * @param array $data
-   *   The user's data (first_name, last_name, display_name).
-   *
-   * @return array
-   *   The payload for the UniFi API.
-   */
-  private function userPayloadForData(string $email, array $data = []): array {
-    // Note: The UniFi Access Developer API (local console) expects a 'profile' object
-    // with 'first_name', 'last_name', and 'email'. Flat fields like 'name' are often
-    // rejected or ignored by newer versions of the API.
-    $first = $data['first_name'] ?? '';
-    $last = $data['last_name'] ?? '';
 
-    // Fallback if names are empty.
-    if ($first === '' && $last === '') {
-      $parts = explode(' ', $data['display_name'] ?? $email);
-      $first = array_shift($parts);
-      $last = implode(' ', $parts) ?: '.';
-    }
-
-    return [
-      'profile' => [
-        'email' => $email,
-        'first_name' => $first,
-        'last_name' => $last,
-      ],
-    ];
-  }
 
 }

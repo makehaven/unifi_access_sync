@@ -134,6 +134,16 @@ class UnifiApiService {
           ],
           'timeout' => 20,
         ]);
+
+        $statusCode = $res->getStatusCode();
+        if ($statusCode < 200 || $statusCode >= 300) {
+          $this->log->error('UniFi listUsers API returned non-2xx status code @code. Response: @body', [
+            '@code' => $statusCode,
+            '@body' => (string) $res->getBody(),
+          ]);
+          return []; // Return empty array on error.
+        }
+
         $json = json_decode($res->getBody()->getContents(), TRUE);
 
         // Some UniFi APIs return results in a 'data' key, others as a top-level array.
@@ -194,6 +204,16 @@ class UnifiApiService {
         'json' => $payload,
         'timeout' => 20,
       ]);
+
+      $statusCode = $res->getStatusCode();
+      if ($statusCode < 200 || $statusCode >= 300) {
+        $this->log->error('UniFi createUser API returned non-2xx status code @code. Response: @body', [
+          '@code' => $statusCode,
+          '@body' => (string) $res->getBody(),
+        ]);
+        return NULL; // Return NULL on error.
+      }
+
       return json_decode($res->getBody()->getContents(), TRUE);
     }
     catch (\Throwable $e) {
@@ -219,17 +239,60 @@ class UnifiApiService {
 
     try {
       // Path adjusted to /proxy/access/integration/... as per console "Integrations" tab.
-      $this->http->request('DELETE', $this->base() . '/proxy/access/integration/v1/developer/users/' . $id, [
+      $res = $this->http->request('DELETE', $this->base() . '/proxy/access/integration/v1/developer/users/' . $id, [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
         'timeout' => 20,
       ]);
+
+      $statusCode = $res->getStatusCode();
+      if ($statusCode < 200 || $statusCode >= 300) {
+        $this->log->error('UniFi deleteUser API returned non-2xx status code @code. Response: @body', [
+          '@code' => $statusCode,
+          '@body' => (string) $res->getBody(),
+        ]);
+        return FALSE; // Return FALSE on error.
+      }
       return TRUE;
     }
     catch (\Throwable $e) {
       $this->log->error('UniFi deleteUser error: @m', ['@m' => $e->getMessage()]);
       return FALSE;
     }
+  }
+
+  /**
+   * Builds the API payload for creating a user.
+   *
+   * @param string $email
+   *   The user's email address.
+   * @param array $data
+   *   The user's data (first_name, last_name, display_name).
+   *
+   * @return array
+   *   The payload for the UniFi API.
+   */
+  public function userPayloadForData(string $email, array $data = []): array {
+    // Note: The UniFi Access Developer API (local console) expects a 'profile' object
+    // with 'first_name', 'last_name', and 'email'. Flat fields like 'name' are often
+    // rejected or ignored by newer versions of the API.
+    $first = $data['first_name'] ?? '';
+    $last = $data['last_name'] ?? '';
+
+    // Fallback if names are empty.
+    if ($first === '' && $last === '') {
+      $parts = explode(' ', $data['display_name'] ?? $email);
+      $first = array_shift($parts);
+      $last = implode(' ', $parts) ?: '.';
+    }
+
+    return [
+      'profile' => [
+        'email' => $email,
+        'first_name' => $first,
+        'last_name' => $last,
+      ],
+    ];
   }
 
 }

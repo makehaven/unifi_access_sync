@@ -10,7 +10,7 @@ services:
 
   unifi_access_sync.sync_manager:
     class: 'Drupal\unifi_access_sync\Service\UnifiSyncManager'
-    arguments: ['@entity_type.manager', '@config.factory', '@logger.channel.unifi_access_sync', '@unifi_access_sync.api']
+    arguments: ['@entity_type.manager', '@config.factory', '@logger.channel.unifi_access_sync', '@unifi_access_sync.api', '@queue']
 
   # Drush command service
   Drupal\unifi_access_sync\Commands\UnifiAccessSyncCommands:

@@ -115,7 +115,7 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
           break;
       }
     }
-    catch (\Exception $e) {
+    catch (\Throwable $e) {
       $this->logger->error('Exception processing UniFi sync task for user @e: @message', [
         '@e' => $email,
         '@message' => $e->getMessage(),

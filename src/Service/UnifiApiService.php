@@ -107,6 +107,17 @@ class UnifiApiService {
   }
 
   /**
+   * Truncates response text before writing to logs.
+   */
+  private function trimForLog(string $value): string {
+    $max = 500;
+    if (strlen($value) <= $max) {
+      return $value;
+    }
+    return substr($value, 0, $max) . '...';
+  }
+
+  /**
    * Lists all users from UniFi Access with pagination.
    *
    * @return array
@@ -139,7 +150,7 @@ class UnifiApiService {
         if ($statusCode < 200 || $statusCode >= 300) {
           $this->log->error('UniFi listUsers API returned non-2xx status code @code. Response: @body', [
             '@code' => $statusCode,
-            '@body' => (string) $res->getBody(),
+            '@body' => $this->trimForLog((string) $res->getBody()),
           ]);
           return []; // Return empty array on error.
         }
@@ -209,7 +220,7 @@ class UnifiApiService {
       if ($statusCode < 200 || $statusCode >= 300) {
         $this->log->error('UniFi createUser API returned non-2xx status code @code. Response: @body', [
           '@code' => $statusCode,
-          '@body' => (string) $res->getBody(),
+          '@body' => $this->trimForLog((string) $res->getBody()),
         ]);
         return NULL; // Return NULL on error.
       }
@@ -249,7 +260,7 @@ class UnifiApiService {
       if ($statusCode < 200 || $statusCode >= 300) {
         $this->log->error('UniFi deleteUser API returned non-2xx status code @code. Response: @body', [
           '@code' => $statusCode,
-          '@body' => (string) $res->getBody(),
+          '@body' => $this->trimForLog((string) $res->getBody()),
         ]);
         return FALSE; // Return FALSE on error.
       }

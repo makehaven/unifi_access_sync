@@ -9,14 +9,16 @@ use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 
 /**
  * Tests the UniFi Access API service pagination.
  *
- * @group unifi_access_sync
+ * Tests the UniFi Access API service pagination.
  */
 #[RunTestsInSeparateProcesses]
+#[Group('unifi_access_sync')]
 class UnifiApiServiceTest extends KernelTestBase {
 
   /**

@@ -72,3 +72,20 @@ Adapt these in code if yours differ.
 
 
 - This module **does not** perform unlocks. Pair with your webhook bridge for real-time decisions.
+
+## Production Re-enable Checklist
+Use this before re-enabling on live.
+
+1. Validate API host/token (or Key module key) and rotate credentials if prior testing was unstable.
+2. Confirm `door_term_id` matches the active Door taxonomy term in production.
+3. Ensure queue processing is healthy:
+   - `drush queue:list`
+   - `drush queue:run unifi_access_sync_queue`
+4. Run a staged reconcile (`drush unifi:sync`) and verify queued create/delete actions are expected.
+5. Monitor `unifi_access_sync` logs for at least one full cron cycle after enable.
+
+## Additional Tests To Add
+- Kernel test for `unifi_access_sync_cron()` throttling behavior (`unifi_access_sync.last_cron`).
+- Kernel tests for entity hook behavior in `unifi_access_sync.module` (insert/update badge_request).
+- Unit tests for `UnifiApiService::userPayloadForData()` edge cases (single-word names, empty names, unusual display names).
+- Unit tests for queue-worker exception rethrow behavior to verify retry semantics.

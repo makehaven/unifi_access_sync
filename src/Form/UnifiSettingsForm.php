@@ -73,12 +73,15 @@ class UnifiSettingsForm extends ConfigFormBase {
       '#open' => TRUE,
       '#markup' => '<ol>' .
         '<li>' . $this->t('Log in to your UniFi Console (e.g., UDM Pro / UNVR).') . '</li>' .
-        '<li>' . $this->t('Open the <strong>UniFi Access</strong> application.') . '</li>' .
+        '<li>' . $this->t('Open the <strong>UniFi Access</strong> application (the door/lock icon — <strong>not</strong> the Network app).') . '</li>' .
         '<li>' . $this->t('Go to <strong>Settings</strong> &rarr; <strong>Control Plane</strong> &rarr; <strong>Integrations</strong>.') . '</li>' .
-        '<li>' . $this->t('Click <strong>Add New API Token</strong> (or similar) to generate your <strong>X-API-KEY</strong>.') . '</li>' .
-        '<li>' . $this->t('Copy the token and paste it into the <strong>API Token</strong> field below.') . '</li>' .
+        '<li>' . $this->t('Click <strong>Create New API Key</strong> to generate your <strong>X-API-KEY</strong>.') . '</li>' .
+        '<li>' . $this->t('Set these permissions on the key: <strong>People &amp; Groups → Edit</strong>, <strong>Visitor → Edit</strong>, <strong>Credentials → Edit</strong>, <strong>Access Policy → View</strong>.') . '</li>' .
+        '<li>' . $this->t('Copy the token immediately — it will not be shown again. Paste it into the <strong>API Token</strong> field below.') . '</li>' .
         '<li>' . $this->t('Note the <strong>API Host</strong> URL provided in the console (usually the IP of your console).') . '</li>' .
       '</ol>' .
+      '<p><strong>' . $this->t('Common mistake:') . '</strong> ' .
+      $this->t('Do not use an API key from the UniFi <strong>Network</strong> app — it must come from <strong>UniFi Access → Integrations</strong>. Network keys will return 401 Unauthorized.') . '</p>' .
       '<p><strong>' . $this->t('Cloud Hosting Tip:') . '</strong> ' .
       $this->t('If this Drupal site is in the cloud and your UniFi console is on a local network, they cannot talk to each other by default. We recommend using a <strong>Cloudflare Tunnel</strong> or <strong>Tailscale</strong> to securely expose the UniFi API to this server without opening risky firewall ports.') . '</p>',
     ];

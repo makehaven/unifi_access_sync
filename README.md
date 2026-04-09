@@ -27,10 +27,17 @@ Syncs Drupal members (with an **active** "Door" permission) to **UniFi Access** 
 
 ### UniFi Console Setup
 1. Log in to your UniFi Console.
-2. Open the **UniFi Access** application.
+2. Open the **UniFi Access** application (the door/lock icon — **not** the Network app).
 3. Navigate to **Settings** &rarr; **Control Plane** &rarr; **Integrations**.
-4. Generate a new API Token. Copy this immediately as it won't be shown again.
-5. Note the console IP/Hostname for the API Host field.
+4. Click **Create New API Key**. Copy the token immediately — it won't be shown again.
+5. Set the following **permissions** on the key:
+   - **People & Groups** → Edit
+   - **Visitor** → Edit
+   - **Credentials** → Edit
+   - **Access Policy** → View
+6. Note the console IP/Hostname for the API Host field.
+
+> **Common mistake:** Do not use an API key from the UniFi **Network** app — it must be from **UniFi Access** → Integrations. Network keys will return `401 Unauthorized`.
 
 ### Drupal Module Setup
 Go to **Config → System → UniFi Access Sync** and set:

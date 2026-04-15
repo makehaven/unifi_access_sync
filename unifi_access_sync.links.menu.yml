@@ -4,3 +4,19 @@ unifi_access_sync.settings:
   parent: system.admin_config_system
   route_name: unifi_access_sync.settings
   weight: 0
+
+# --- Staff Tools menu entries ---
+unifi_access_sync.staff_tab:
+  title: 'Access & Security'
+  description: 'Door access sync and physical security.'
+  menu_name: staff-tools
+  url: 'internal:/admin/config/system/unifi-access-sync'
+  weight: 45
+
+unifi_access_sync.staff_settings:
+  title: 'UniFi Access Sync'
+  description: 'Configure and monitor UniFi Access member sync.'
+  route_name: unifi_access_sync.settings
+  menu_name: staff-tools
+  parent: unifi_access_sync.staff_tab
+  weight: 5

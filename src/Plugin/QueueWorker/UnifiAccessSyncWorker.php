@@ -14,7 +14,7 @@ use Drupal\Core\Logger\LoggerChannelInterface;
  * @QueueWorker(
  *   id = "unifi_access_sync_queue",
  *   title = @Translation("UniFi Access Synchronization Queue"),
- *   batch_size = 10
+ *   cron = {"time" = 60}
  * )
  */
 class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryPluginInterface {

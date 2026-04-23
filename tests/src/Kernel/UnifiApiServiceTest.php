@@ -3,6 +3,7 @@
 namespace Drupal\Tests\unifi_access_sync\Kernel;
 
 use Drupal\KernelTests\KernelTestBase;
+use Drupal\unifi_access_sync\Service\UnifiApiResult;
 use Drupal\unifi_access_sync\Service\UnifiApiService;
 use GuzzleHttp\Client;
 use GuzzleHttp\ClientInterface;
@@ -13,17 +14,16 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 
 /**
- * Tests the UniFi Access API service pagination.
+ * Tests the UniFi Access API service.
  *
- * Tests the UniFi Access API service pagination.
+ * API methods all return UnifiApiResult (success carries ->data, failure
+ * carries ->statusCode / ->errorMessage / ->responseBody). These tests
+ * assert on both the success and failure shapes.
  */
 #[RunTestsInSeparateProcesses]
 #[Group('unifi_access_sync')]
 class UnifiApiServiceTest extends KernelTestBase {
 
-  /**
-   * {@inheritdoc}
-   */
   protected static $modules = [
     'system',
     'unifi_access_sync',
@@ -32,19 +32,16 @@ class UnifiApiServiceTest extends KernelTestBase {
   /**
    * Tests pagination logic in listUsers.
    */
-  public function testListUsersPagination() {
+  public function testListUsersPagination(): void {
     $this->config('unifi_access_sync.settings')
       ->set('api_host', 'https://unifi.example.com')
       ->set('api_token', 'test-token')
       ->save();
 
-    // Page 1 response: 50 users (full page)
     $page1_data = [];
     for ($i = 1; $i <= 50; $i++) {
       $page1_data[] = ['id' => "u$i", 'email' => "user$i@example.com"];
     }
-
-    // Page 2 response: 10 users (partial page, indicates end)
     $page2_data = [];
     for ($i = 51; $i <= 60; $i++) {
       $page2_data[] = ['id' => "u$i", 'email' => "user$i@example.com"];
@@ -64,25 +61,25 @@ class UnifiApiServiceTest extends KernelTestBase {
       $this->container->get('logger.channel.unifi_access_sync')
     );
 
-    $users = $apiService->listUsers();
+    $result = $apiService->listUsers();
 
-    $this->assertCount(60, $users);
-    $this->assertEquals('user1@example.com', $users[0]['email']);
-    $this->assertEquals('user60@example.com', $users[59]['email']);
+    $this->assertInstanceOf(UnifiApiResult::class, $result);
+    $this->assertTrue($result->ok);
+    $this->assertCount(60, $result->data);
+    $this->assertEquals('user1@example.com', $result->data[0]['email']);
+    $this->assertEquals('user60@example.com', $result->data[59]['email']);
   }
 
   /**
    * Tests Key module integration.
    */
-  public function testKeyModuleIntegration() {
-    // We need to enable the key module for this test.
+  public function testKeyModuleIntegration(): void {
     $this->enableModules(['key']);
     $this->installEntitySchema('key');
 
     $key_id = 'test_api_key';
     $key_value = 'key-from-module';
 
-    // Mock KeyRepository.
     $keyMock = $this->getMockBuilder('Drupal\key\Entity\Key')
       ->disableOriginalConstructor()
       ->getMock();
@@ -100,7 +97,6 @@ class UnifiApiServiceTest extends KernelTestBase {
       ->save();
 
     $client = $this->createMock(ClientInterface::class);
-    // Verify the token from the key module is used in the X-API-KEY header.
     $client->expects($this->once())
       ->method('request')
       ->with('GET', $this->anything(), $this->callback(function ($options) use ($key_value) {
@@ -121,7 +117,7 @@ class UnifiApiServiceTest extends KernelTestBase {
   /**
    * Tests SSL verification and timeout options.
    */
-  public function testRequestOptions() {
+  public function testRequestOptions(): void {
     $this->config('unifi_access_sync.settings')
       ->set('api_host', 'https://unifi.example.com')
       ->set('api_token', 'test-token')
@@ -146,9 +142,9 @@ class UnifiApiServiceTest extends KernelTestBase {
   }
 
   /**
-   * Tests error handling in listUsers.
+   * Tests that a non-2xx response surfaces as a failure result with detail.
    */
-  public function testListUsersErrorHandling() {
+  public function testListUsersErrorHandling(): void {
     $this->config('unifi_access_sync.settings')
       ->set('api_host', 'https://unifi.example.com')
       ->set('api_token', 'test-token')
@@ -167,14 +163,16 @@ class UnifiApiServiceTest extends KernelTestBase {
       $this->container->get('logger.channel.unifi_access_sync')
     );
 
-    $users = $apiService->listUsers();
-    $this->assertSame([], $users);
+    $result = $apiService->listUsers();
+    $this->assertFalse($result->ok);
+    $this->assertSame(500, $result->statusCode);
+    $this->assertSame('Internal Server Error', $result->responseBody);
   }
 
   /**
    * Tests createUser and deleteUser success and error handling.
    */
-  public function testCreateAndDeleteUser() {
+  public function testCreateAndDeleteUser(): void {
     $this->config('unifi_access_sync.settings')
       ->set('api_host', 'https://unifi.example.com')
       ->set('api_token', 'test-token')
@@ -198,29 +196,32 @@ class UnifiApiServiceTest extends KernelTestBase {
 
     // Success create.
     $result = $apiService->createUser(['profile' => ['email' => 'new@example.com']]);
-    $this->assertEquals('new_id', $result['id']);
+    $this->assertTrue($result->ok);
+    $this->assertEquals('new_id', $result->data['id']);
 
     // Error create.
     $result = $apiService->createUser(['profile' => ['email' => 'error@example.com']]);
-    $this->assertNull($result);
+    $this->assertFalse($result->ok);
+    $this->assertSame(500, $result->statusCode);
 
     // Success delete.
     $result = $apiService->deleteUser('new_id');
-    $this->assertTrue($result);
+    $this->assertTrue($result->ok);
 
     // Error delete.
     $result = $apiService->deleteUser('missing_id');
-    $this->assertFalse($result);
+    $this->assertFalse($result->ok);
+    $this->assertSame(404, $result->statusCode);
+    $this->assertSame('Not Found', $result->responseBody);
   }
 
   /**
-   * Ensures requests are skipped when configuration is missing.
+   * Missing host/token short-circuits all three calls with failure results.
    */
-  public function testListUsersSkipsWhenNotConfigured() {
+  public function testListUsersSkipsWhenNotConfigured(): void {
     $client = $this->createMock(ClientInterface::class);
     $client->expects($this->never())->method('request');
 
-    // No api_host or api_token set in config.
     $this->config('unifi_access_sync.settings')
       ->set('api_host', '')
       ->set('api_token', '')
@@ -232,10 +233,9 @@ class UnifiApiServiceTest extends KernelTestBase {
       $this->container->get('logger.channel.unifi_access_sync')
     );
 
-    $users = $apiService->listUsers();
-    $this->assertSame([], $users);
-    $this->assertNull($apiService->createUser(['profile' => ['email' => 'test@example.com']]));
-    $this->assertFalse($apiService->deleteUser('abc123'));
+    $this->assertFalse($apiService->listUsers()->ok);
+    $this->assertFalse($apiService->createUser(['profile' => ['email' => 'test@example.com']])->ok);
+    $this->assertFalse($apiService->deleteUser('abc123')->ok);
   }
 
 }

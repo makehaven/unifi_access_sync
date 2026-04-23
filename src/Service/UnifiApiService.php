@@ -5,42 +5,30 @@ namespace Drupal\unifi_access_sync\Service;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Logger\LoggerChannelInterface;
 use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Exception\RequestException;
 use Drupal\key\KeyRepositoryInterface;
 
 /**
  * HTTP client for the UniFi Access Developer API.
+ *
+ * Every public call returns a UnifiApiResult so callers can distinguish
+ * failure from a legitimately empty response, and so failure reasons
+ * (HTTP status + response body + exception message) are preserved for
+ * operators rather than collapsed to NULL.
  */
 class UnifiApiService {
 
-  /**
-   * The HTTP client.
-   *
-   * @var \GuzzleHttp\ClientInterface
-   */
   private ClientInterface $http;
-
-  /**
-   * The module configuration.
-   *
-   * @var \Drupal\Core\Config\ImmutableConfig
-   */
   private $cfg;
-
-  /**
-   * The logger channel.
-   *
-   * @var \Drupal\Core\Logger\LoggerChannelInterface
-   */
   private LoggerChannelInterface $log;
-
-  /**
-   * The key repository service.
-   *
-   * @var \Drupal\key\KeyRepositoryInterface|null
-   */
   private ?KeyRepositoryInterface $keyRepo;
 
-  public function __construct(ClientInterface $http, ConfigFactoryInterface $config_factory, LoggerChannelInterface $log, ?KeyRepositoryInterface $key_repo = NULL) {
+  public function __construct(
+    ClientInterface $http,
+    ConfigFactoryInterface $config_factory,
+    LoggerChannelInterface $log,
+    ?KeyRepositoryInterface $key_repo = NULL,
+  ) {
     $this->http = $http;
     $this->cfg = $config_factory->get('unifi_access_sync.settings');
     $this->log = $log;
@@ -72,10 +60,12 @@ class UnifiApiService {
 
   /**
    * Returns HTTP headers for API requests.
+   *
+   * The UniFi Access console "Integrations" tab issues keys using an
+   * X-API-KEY header rather than a standard Bearer token. Network-app
+   * keys return 401 if used here.
    */
   private function headers(): array {
-    // Note: The UniFi Access local console "Integrations" tab specifies
-    // X-API-KEY instead of the standard Bearer token.
     return [
       'X-API-KEY' => $this->getToken(),
       'Accept' => 'application/json',
@@ -91,19 +81,12 @@ class UnifiApiService {
   }
 
   /**
-   * Checks if the API is configured with host and token.
+   * Checks whether host and token are both set.
    */
   private function isConfigured(): bool {
     $host = trim((string) $this->cfg->get('api_host'));
     $token = trim((string) $this->getToken());
     return $host !== '' && $token !== '';
-  }
-
-  /**
-   * Logs a warning when configuration is missing.
-   */
-  private function logMissingConfig(): void {
-    $this->log->warning('UniFi API not configured: missing api_host or token.');
   }
 
   /**
@@ -118,24 +101,24 @@ class UnifiApiService {
   }
 
   /**
-   * Lists all users from UniFi Access with pagination.
+   * Lists all users from UniFi Access, paginated.
    *
-   * @return array
-   *   An array of user data from UniFi Access.
+   * On success, result->data is an array of user rows (possibly empty if
+   * the tenant is genuinely empty). On failure, result->ok is FALSE and
+   * the HTTP status, error message, and response body are populated.
    */
-  public function listUsers(): array {
+  public function listUsers(): UnifiApiResult {
+    if (!$this->isConfigured()) {
+      $this->log->warning('UniFi API not configured: missing api_host or token.');
+      return UnifiApiResult::failure('UniFi API not configured (missing host or token).');
+    }
+
     $all_users = [];
     $page = 1;
     $pageSize = 50;
 
-    if (!$this->isConfigured()) {
-      $this->logMissingConfig();
-      return $all_users;
-    }
-
     try {
       do {
-        // Path adjusted to /proxy/access/integration/... as per console "Integrations" tab.
         $res = $this->http->request('GET', $this->base() . '/proxy/access/integration/v1/developer/users', [
           'headers' => $this->headers(),
           'verify' => $this->verify(),
@@ -148,67 +131,70 @@ class UnifiApiService {
 
         $statusCode = $res->getStatusCode();
         if ($statusCode < 200 || $statusCode >= 300) {
-          $this->log->error('UniFi listUsers API returned non-2xx status code @code. Response: @body', [
+          $body = $this->trimForLog((string) $res->getBody());
+          $this->log->error('UniFi listUsers returned HTTP @code. Response: @body', [
             '@code' => $statusCode,
-            '@body' => $this->trimForLog((string) $res->getBody()),
+            '@body' => $body,
           ]);
-          return []; // Return empty array on error.
+          return UnifiApiResult::failure(
+            errorMessage: 'listUsers non-2xx response',
+            statusCode: $statusCode,
+            responseBody: $body,
+          );
         }
 
         $json = json_decode($res->getBody()->getContents(), TRUE);
-
-        // Some UniFi APIs return results in a 'data' key, others as a top-level array.
-        // Based on common patterns, it often has { data: [...], total: X }.
         $users = [];
         if (isset($json['data']) && is_array($json['data'])) {
           $users = $json['data'];
         }
         elseif (is_array($json)) {
-          // If it returned a top-level array, it might not be paginated the way we expect,
-          // or we reached the end.
           $users = $json;
         }
 
         if (empty($users)) {
           break;
         }
-
         $all_users = array_merge($all_users, $users);
-
-        // If we got fewer results than requested, we likely reached the end.
         if (count($users) < $pageSize) {
           break;
         }
-
         $page++;
       } while (TRUE);
 
-      return $all_users;
+      return UnifiApiResult::success(data: $all_users, statusCode: 200);
+    }
+    catch (RequestException $e) {
+      $response = $e->getResponse();
+      $statusCode = $response?->getStatusCode();
+      $body = $response ? $this->trimForLog((string) $response->getBody()) : NULL;
+      $this->log->error('UniFi listUsers HTTP error @code: @m. Body: @body', [
+        '@code' => $statusCode ?? 'n/a',
+        '@m' => $e->getMessage(),
+        '@body' => $body ?? '',
+      ]);
+      return UnifiApiResult::failure(
+        errorMessage: $e->getMessage(),
+        statusCode: $statusCode,
+        responseBody: $body,
+      );
     }
     catch (\Throwable $e) {
-      $this->log->error('UniFi listUsers error: @m', ['@m' => $e->getMessage()]);
-      // Return what we have so far.
-      return $all_users;
+      $this->log->error('UniFi listUsers exception: @m', ['@m' => $e->getMessage()]);
+      return UnifiApiResult::failure(errorMessage: 'Exception: ' . $e->getMessage());
     }
   }
 
   /**
    * Creates a user in UniFi Access.
-   *
-   * @param array $payload
-   *   The user data to send to the API.
-   *
-   * @return array|null
-   *   The created user data, or NULL on failure.
    */
-  public function createUser(array $payload): ?array {
+  public function createUser(array $payload): UnifiApiResult {
     if (!$this->isConfigured()) {
-      $this->logMissingConfig();
-      return NULL;
+      $this->log->warning('UniFi API not configured: missing api_host or token.');
+      return UnifiApiResult::failure('UniFi API not configured (missing host or token).');
     }
 
     try {
-      // Path adjusted to /proxy/access/integration/... as per console "Integrations" tab.
       $res = $this->http->request('POST', $this->base() . '/proxy/access/integration/v1/developer/users', [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
@@ -218,38 +204,53 @@ class UnifiApiService {
 
       $statusCode = $res->getStatusCode();
       if ($statusCode < 200 || $statusCode >= 300) {
-        $this->log->error('UniFi createUser API returned non-2xx status code @code. Response: @body', [
+        $body = $this->trimForLog((string) $res->getBody());
+        $this->log->error('UniFi createUser returned HTTP @code. Response: @body', [
           '@code' => $statusCode,
-          '@body' => $this->trimForLog((string) $res->getBody()),
+          '@body' => $body,
         ]);
-        return NULL; // Return NULL on error.
+        return UnifiApiResult::failure(
+          errorMessage: 'createUser non-2xx response',
+          statusCode: $statusCode,
+          responseBody: $body,
+        );
       }
-
-      return json_decode($res->getBody()->getContents(), TRUE);
+      return UnifiApiResult::success(
+        data: json_decode($res->getBody()->getContents(), TRUE),
+        statusCode: $statusCode,
+      );
+    }
+    catch (RequestException $e) {
+      $response = $e->getResponse();
+      $statusCode = $response?->getStatusCode();
+      $body = $response ? $this->trimForLog((string) $response->getBody()) : NULL;
+      $this->log->error('UniFi createUser HTTP error @code: @m. Body: @body', [
+        '@code' => $statusCode ?? 'n/a',
+        '@m' => $e->getMessage(),
+        '@body' => $body ?? '',
+      ]);
+      return UnifiApiResult::failure(
+        errorMessage: $e->getMessage(),
+        statusCode: $statusCode,
+        responseBody: $body,
+      );
     }
     catch (\Throwable $e) {
-      $this->log->error('UniFi createUser error: @m', ['@m' => $e->getMessage()]);
-      return NULL;
+      $this->log->error('UniFi createUser exception: @m', ['@m' => $e->getMessage()]);
+      return UnifiApiResult::failure(errorMessage: 'Exception: ' . $e->getMessage());
     }
   }
 
   /**
    * Deletes a user from UniFi Access.
-   *
-   * @param string $id
-   *   The UniFi user ID.
-   *
-   * @return bool
-   *   TRUE on success, FALSE on failure.
    */
-  public function deleteUser(string $id): bool {
+  public function deleteUser(string $id): UnifiApiResult {
     if (!$this->isConfigured()) {
-      $this->logMissingConfig();
-      return FALSE;
+      $this->log->warning('UniFi API not configured: missing api_host or token.');
+      return UnifiApiResult::failure('UniFi API not configured (missing host or token).');
     }
 
     try {
-      // Path adjusted to /proxy/access/integration/... as per console "Integrations" tab.
       $res = $this->http->request('DELETE', $this->base() . '/proxy/access/integration/v1/developer/users/' . $id, [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
@@ -258,39 +259,51 @@ class UnifiApiService {
 
       $statusCode = $res->getStatusCode();
       if ($statusCode < 200 || $statusCode >= 300) {
-        $this->log->error('UniFi deleteUser API returned non-2xx status code @code. Response: @body', [
+        $body = $this->trimForLog((string) $res->getBody());
+        $this->log->error('UniFi deleteUser returned HTTP @code. Response: @body', [
           '@code' => $statusCode,
-          '@body' => $this->trimForLog((string) $res->getBody()),
+          '@body' => $body,
         ]);
-        return FALSE; // Return FALSE on error.
+        return UnifiApiResult::failure(
+          errorMessage: 'deleteUser non-2xx response',
+          statusCode: $statusCode,
+          responseBody: $body,
+        );
       }
-      return TRUE;
+      return UnifiApiResult::success(statusCode: $statusCode);
+    }
+    catch (RequestException $e) {
+      $response = $e->getResponse();
+      $statusCode = $response?->getStatusCode();
+      $body = $response ? $this->trimForLog((string) $response->getBody()) : NULL;
+      $this->log->error('UniFi deleteUser HTTP error @code: @m. Body: @body', [
+        '@code' => $statusCode ?? 'n/a',
+        '@m' => $e->getMessage(),
+        '@body' => $body ?? '',
+      ]);
+      return UnifiApiResult::failure(
+        errorMessage: $e->getMessage(),
+        statusCode: $statusCode,
+        responseBody: $body,
+      );
     }
     catch (\Throwable $e) {
-      $this->log->error('UniFi deleteUser error: @m', ['@m' => $e->getMessage()]);
-      return FALSE;
+      $this->log->error('UniFi deleteUser exception: @m', ['@m' => $e->getMessage()]);
+      return UnifiApiResult::failure(errorMessage: 'Exception: ' . $e->getMessage());
     }
   }
 
   /**
    * Builds the API payload for creating a user.
    *
-   * @param string $email
-   *   The user's email address.
-   * @param array $data
-   *   The user's data (first_name, last_name, display_name).
-   *
-   * @return array
-   *   The payload for the UniFi API.
+   * The UniFi Access Developer API (local console) expects a 'profile'
+   * object with 'first_name', 'last_name', and 'email'. Flat fields like
+   * 'name' are often rejected or ignored by newer API versions.
    */
   public function userPayloadForData(string $email, array $data = []): array {
-    // Note: The UniFi Access Developer API (local console) expects a 'profile' object
-    // with 'first_name', 'last_name', and 'email'. Flat fields like 'name' are often
-    // rejected or ignored by newer versions of the API.
     $first = $data['first_name'] ?? '';
     $last = $data['last_name'] ?? '';
 
-    // Fallback if names are empty.
     if ($first === '' && $last === '') {
       $parts = explode(' ', $data['display_name'] ?? $email);
       $first = array_shift($parts);

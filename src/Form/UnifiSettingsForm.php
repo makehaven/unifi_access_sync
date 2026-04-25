@@ -171,17 +171,24 @@ class UnifiSettingsForm extends ConfigFormBase {
 
   /**
    * Tests the API connection by attempting to list users.
+   *
+   * Surfaces the UnifiApiResult's failure detail directly to the form
+   * (HTTP code + response body) so an admin can diagnose without having
+   * to dig through watchdog. Uses the CURRENTLY SAVED configuration —
+   * save first, then click test.
    */
   public function testApiConnection(array &$form, FormStateInterface $form_state) {
-    // Note: This uses the CURRENTLY SAVED configuration.
-    $users = $this->api->listUsers();
-    if (!empty($users)) {
+    $result = $this->api->listUsers();
+    if ($result->ok) {
+      $count = is_array($result->data) ? count($result->data) : 0;
       $this->messenger()->addStatus($this->t('Successfully connected to UniFi! Found @count users.', [
-        '@count' => count($users),
+        '@count' => $count,
       ]));
     }
     else {
-      $this->messenger()->addError($this->t('Failed to retrieve users. Check logs and verify API Host, Token, and SSL settings.'));
+      $this->messenger()->addError($this->t('Failed to connect to UniFi: @reason', [
+        '@reason' => $result->describe(),
+      ]));
     }
     $form_state->setRebuild();
   }

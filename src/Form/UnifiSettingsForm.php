@@ -94,6 +94,13 @@ class UnifiSettingsForm extends ConfigFormBase {
       '#required' => TRUE,
     ];
 
+    $form['api_path_prefix'] = [
+      '#type' => 'textfield',
+      '#title' => $this->t('Developer API path prefix'),
+      '#default_value' => $cfg->get('api_path_prefix') ?: '/api/v1/developer',
+      '#description' => $this->t('<code>/api/v1/developer</code> when the host is the console port 12445 (or a tunnel to it). The 443 <code>/proxy/access/integration/v1/developer</code> route only admits UniFi OS keys, which the Access API then rejects, so it is not usable.'),
+    ];
+
     $form['use_key_module'] = [
       '#type' => 'checkbox',
       '#title' => $this->t('Use Key module for API Token'),
@@ -208,6 +215,7 @@ class UnifiSettingsForm extends ConfigFormBase {
 
     $this->configFactory()->getEditable(self::CONFIG_NAME)
       ->set('api_host', rtrim((string) $form_state->getValue('api_host'), '/'))
+      ->set('api_path_prefix', '/' . trim((string) ($form_state->getValue('api_path_prefix') ?: '/api/v1/developer'), '/'))
       ->set('use_key_module', (bool) $form_state->getValue('use_key_module'))
       ->set('api_token', (string) $form_state->getValue('api_token'))
       ->set('api_key_id', (string) $form_state->getValue('api_key_id'))

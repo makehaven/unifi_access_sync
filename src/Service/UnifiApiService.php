@@ -18,9 +18,32 @@ use Drupal\key\KeyRepositoryInterface;
  */
 class UnifiApiService {
 
+  /**
+   * The HTTP client.
+   *
+   * @var \GuzzleHttp\ClientInterface
+   */
   private ClientInterface $http;
+
+  /**
+   * The module settings.
+   *
+   * @var \Drupal\Core\Config\ImmutableConfig
+   */
   private $cfg;
+
+  /**
+   * The logger.
+   *
+   * @var \Drupal\Core\Logger\LoggerChannelInterface
+   */
   private LoggerChannelInterface $log;
+
+  /**
+   * The Key repository, when the Key module is installed.
+   *
+   * @var \Drupal\key\KeyRepositoryInterface|null
+   */
   private ?KeyRepositoryInterface $keyRepo;
 
   public function __construct(
@@ -39,7 +62,9 @@ class UnifiApiService {
    * Returns the base URL for the UniFi API.
    */
   private function base(): string {
-    return rtrim($this->cfg->get('api_host'), '/');
+    $host = rtrim((string) $this->cfg->get('api_host'), '/');
+    $prefix = trim((string) ($this->cfg->get('api_path_prefix') ?: '/api/v1/developer'), '/');
+    return $host . '/' . $prefix;
   }
 
   /**
@@ -123,7 +148,7 @@ class UnifiApiService {
 
     try {
       do {
-        $res = $this->http->request('GET', $this->base() . '/proxy/access/integration/v1/developer/users', [
+        $res = $this->http->request('GET', $this->base() . '/users', [
           'headers' => $this->headers(),
           'verify' => $this->verify(),
           'query' => [
@@ -199,7 +224,7 @@ class UnifiApiService {
     }
 
     try {
-      $res = $this->http->request('POST', $this->base() . '/proxy/access/integration/v1/developer/users', [
+      $res = $this->http->request('POST', $this->base() . '/users', [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
         'json' => $payload,
@@ -255,7 +280,7 @@ class UnifiApiService {
     }
 
     try {
-      $res = $this->http->request('DELETE', $this->base() . '/proxy/access/integration/v1/developer/users/' . $id, [
+      $res = $this->http->request('DELETE', $this->base() . '/users/' . $id, [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
         'timeout' => 20,

@@ -41,7 +41,7 @@ Syncs Drupal members (with an **active** "Door" permission) to **UniFi Access** 
 
 ### Drupal Module Setup
 Go to **Config → System → UniFi Access Sync** and set:
-- **API Host:** Enter **only the base URL** of your UniFi Console (e.g., `https://unifi.yourdomain.com` or `https://192.168.1.1`). **Do NOT include `/proxy/access/integration/v1/developer/users` or any other path segments.** This module will append the correct API paths automatically.
+- **API Host:** Enter **only the base URL** of your UniFi Console (e.g., `https://unifi.yourdomain.com` or `https://192.168.1.1`). **Do NOT include the path.** The module appends the developer API prefix (`/api/v1/developer` by default, configurable) and `/users`.
 - **API Token:** Paste the token generated above (sent as `X-API-KEY` header).
 - **Verify SSL:** Uncheck if using a self-signed certificate (common for local IPs).
 - **Door Term ID:** The taxonomy term ID representing the "Door" access level.

@@ -5,6 +5,9 @@ unifi_access_sync.settings:
     api_host:
       type: string
       label: 'UniFi Access API host'
+    api_path_prefix:
+      type: string
+      label: 'Developer API path prefix'
     api_token:
       type: string
       label: 'UniFi Access API token'

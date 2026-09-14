@@ -28,7 +28,7 @@ phpunit -c core web/modules/custom/unifi_access_sync/tests/src/Kernel/UnifiSyncM
 
 | Service | Class | Purpose |
 |---------|-------|---------|
-| `unifi_access_sync.api` | `UnifiApiService` | Low-level HTTP client for UniFi Access Developer API (`/api/v1/developer/users`) |
+| `unifi_access_sync.api` | `UnifiApiService` | Low-level HTTP client for UniFi Access Developer API (`{api_path_prefix}/users`, default `/api/v1/developer`) |
 | `unifi_access_sync.sync_manager` | `UnifiSyncManager` | Orchestrates reconciliation between Drupal badge_request nodes and UniFi users |
 
 ### Data Flow

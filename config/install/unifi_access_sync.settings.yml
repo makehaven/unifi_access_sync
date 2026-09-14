@@ -1,4 +1,5 @@
 api_host: ''
+api_path_prefix: /api/v1/developer
 api_token: ''
 verify_ssl: false
 door_term_id: 0

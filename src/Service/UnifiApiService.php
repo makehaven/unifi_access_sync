@@ -66,8 +66,12 @@ class UnifiApiService {
    * keys return 401 if used here.
    */
   private function headers(): array {
+    $token = $this->getToken();
     return [
-      'X-API-KEY' => $this->getToken(),
+      // Access accepts either header on port 12445; UniFi OS on 443 only
+      // passes X-API-KEY through to Access, so both are sent.
+      'Authorization' => 'Bearer ' . $token,
+      'X-API-KEY' => $token,
       'Accept' => 'application/json',
       'Content-Type' => 'application/json',
     ];

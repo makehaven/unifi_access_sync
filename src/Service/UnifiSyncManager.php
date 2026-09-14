@@ -12,10 +12,35 @@ use Drupal\Core\Queue\QueueFactory;
  */
 class UnifiSyncManager {
 
+  /**
+   * The etm.
+   *
+   * @var \Drupal\Core\Entity\EntityTypeManagerInterface
+   */
   private EntityTypeManagerInterface $etm;
+  /**
+   * The cfg.
+   *
+   * @var mixed
+   */
   private $cfg;
+  /**
+   * The log.
+   *
+   * @var \Drupal\Core\Logger\LoggerChannelInterface
+   */
   private LoggerChannelInterface $log;
+  /**
+   * The queue factory.
+   *
+   * @var \Drupal\Core\Queue\QueueFactory
+   */
   protected QueueFactory $queueFactory;
+  /**
+   * The api.
+   *
+   * @var UnifiApiService
+   */
   private UnifiApiService $api;
 
   /**
@@ -107,6 +132,10 @@ class UnifiSyncManager {
     }
     foreach ($have as $email => $user) {
       if (!isset($should[$email]) && !empty($user['id'])) {
+        if (!$this->deletesAllowed()) {
+          $this->log->notice('Would delete UniFi user @e (not door-badged in Drupal) — deletions are disabled (allow_delete).', ['@e' => $email]);
+          continue;
+        }
         $this->log->notice('Queueing UniFi user deletion for @e', ['@e' => $email]);
         $queue->createItem([
           'action' => 'delete',
@@ -147,6 +176,10 @@ class UnifiSyncManager {
       ]);
     }
     elseif (!$should_have && $exists && !empty($have[$email]['id'])) {
+      if (!$this->deletesAllowed()) {
+        $this->log->notice('Would delete UniFi user @e — deletions are disabled (allow_delete).', ['@e' => $email]);
+        return;
+      }
       $this->log->notice('Queueing single UniFi user deletion for @e', ['@e' => $email]);
       $queue->createItem([
         'action' => 'delete',
@@ -154,6 +187,17 @@ class UnifiSyncManager {
         'user_id' => $have[$email]['id'],
       ]);
     }
+  }
+
+  /**
+   * Whether reconcile may remove UniFi users that Drupal does not vouch for.
+   *
+   * Off by default: the console may hold staff, contractors and visitors
+   * that were never Drupal door badges, and a first reconcile against a
+   * populated console would otherwise delete them all.
+   */
+  public function deletesAllowed(): bool {
+    return (bool) $this->cfg->get('allow_delete');
   }
 
   /**

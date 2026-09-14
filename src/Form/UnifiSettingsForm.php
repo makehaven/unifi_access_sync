@@ -72,13 +72,13 @@ class UnifiSettingsForm extends ConfigFormBase {
       '#title' => $this->t('Setup Guide: UniFi Access Console'),
       '#open' => TRUE,
       '#markup' => '<ol>' .
-        '<li>' . $this->t('Log in to your UniFi Console (e.g., UDM Pro / UNVR).') . '</li>' .
-        '<li>' . $this->t('Open the <strong>UniFi Access</strong> application (the door/lock icon — <strong>not</strong> the Network app).') . '</li>' .
-        '<li>' . $this->t('Go to <strong>Settings</strong> &rarr; <strong>Control Plane</strong> &rarr; <strong>Integrations</strong>.') . '</li>' .
-        '<li>' . $this->t('Click <strong>Create New API Key</strong> to generate your <strong>X-API-KEY</strong>.') . '</li>' .
-        '<li>' . $this->t('Set these permissions on the key: <strong>People &amp; Groups → Edit</strong>, <strong>Visitor → Edit</strong>, <strong>Credentials → Edit</strong>, <strong>Access Policy → View</strong>.') . '</li>' .
-        '<li>' . $this->t('Copy the token immediately — it will not be shown again. Paste it into the <strong>API Token</strong> field below.') . '</li>' .
-        '<li>' . $this->t('Note the <strong>API Host</strong> URL provided in the console (usually the IP of your console).') . '</li>' .
+      '<li>' . $this->t('Log in to your UniFi Console (e.g., UDM Pro / UNVR).') . '</li>' .
+      '<li>' . $this->t('Open the <strong>UniFi Access</strong> application (the door/lock icon — <strong>not</strong> the Network app).') . '</li>' .
+      '<li>' . $this->t('Go to <strong>Settings</strong> &rarr; <strong>Control Plane</strong> &rarr; <strong>Integrations</strong>.') . '</li>' .
+      '<li>' . $this->t('Click <strong>Create New API Key</strong> to generate your <strong>X-API-KEY</strong>.') . '</li>' .
+      '<li>' . $this->t('Set these permissions on the key: <strong>People &amp; Groups → Edit</strong>, <strong>Visitor → Edit</strong>, <strong>Credentials → Edit</strong>, <strong>Access Policy → View</strong>.') . '</li>' .
+      '<li>' . $this->t('Copy the token immediately — it will not be shown again. Paste it into the <strong>API Token</strong> field below.') . '</li>' .
+      '<li>' . $this->t('Note the <strong>API Host</strong> URL provided in the console (usually the IP of your console).') . '</li>' .
       '</ol>' .
       '<p><strong>' . $this->t('Common mistake:') . '</strong> ' .
       $this->t('Do not use an API key from the UniFi <strong>Network</strong> app — it must come from <strong>UniFi Access → Integrations</strong>. Network keys will return 401 Unauthorized.') . '</p>' .
@@ -158,6 +158,13 @@ class UnifiSettingsForm extends ConfigFormBase {
       '#required' => TRUE,
     ];
 
+    $form['allow_delete'] = [
+      '#type' => 'checkbox',
+      '#title' => $this->t('Allow the sync to delete UniFi users that are not door-badged in Drupal'),
+      '#description' => $this->t('Off: such users are only logged as "would delete". Turn on once the console holds nothing but Drupal-managed members.'),
+      '#default_value' => (bool) $cfg->get('allow_delete'),
+    ];
+
     $form['actions']['test'] = [
       '#type' => 'submit',
       '#value' => $this->t('Test API Connection'),
@@ -206,6 +213,7 @@ class UnifiSettingsForm extends ConfigFormBase {
       ->set('api_key_id', (string) $form_state->getValue('api_key_id'))
       ->set('verify_ssl', (bool) $form_state->getValue('verify_ssl'))
       ->set('door_term_id', $door_term_id)
+      ->set('allow_delete', (bool) $form_state->getValue('allow_delete'))
       ->save();
 
     parent::submitForm($form, $form_state);

@@ -45,6 +45,7 @@ Go to **Config → System → UniFi Access Sync** and set:
 - **API Token:** Paste the token generated above (sent as `X-API-KEY` header).
 - **Verify SSL:** Uncheck if using a self-signed certificate (common for local IPs).
 - **Door Term ID:** The taxonomy term ID representing the "Door" access level.
+- **Allow deletions:** Off by default. While off, a reconcile only logs "Would delete …" for UniFi users that are not door-badged in Drupal (staff, contractors, visitors the console holds for other reasons). Turn it on only after reviewing that log and confirming the console holds nothing but Drupal-managed members.
 
 ### Important Notes on Resilience and Performance
 - **Asynchronous Processing:** All UniFi API calls (create/delete users) are now processed **asynchronously** via Drupal's Queue API. This prevents cron execution timeouts and improves site responsiveness. You can monitor the `unifi_access_sync_queue` via `drush queue:list` and process it with `drush queue:run unifi_access_sync_queue`.
@@ -84,6 +85,7 @@ Adapt these in code if yours differ.
 Use this before re-enabling on live.
 
 1. Validate API host/token (or Key module key) and rotate credentials if prior testing was unstable.
+1. Leave **Allow deletions** off for the first cron cycle; read the "Would delete" notices in the `unifi_access_sync` log and decide.
 2. Confirm `door_term_id` matches the active Door taxonomy term in production.
 3. Ensure queue processing is healthy:
    - `drush queue:list`

@@ -20,3 +20,6 @@ unifi_access_sync.settings:
     api_key_id:
       type: string
       label: 'Key ID from Key module'
+    allow_delete:
+      type: boolean
+      label: 'Allow reconcile to delete UniFi users missing from Drupal'

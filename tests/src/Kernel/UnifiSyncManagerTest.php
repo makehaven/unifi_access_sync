@@ -25,6 +25,11 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 #[Group('unifi_access_sync')]
 class UnifiSyncManagerTest extends KernelTestBase {
 
+  /**
+   * The modules.
+   *
+   * @var array
+   */
   protected static $modules = [
     'system',
     'user',
@@ -36,11 +41,34 @@ class UnifiSyncManagerTest extends KernelTestBase {
     'unifi_access_sync',
   ];
 
+  /**
+   * The api mock.
+   *
+   * @var mixed
+   */
   protected $apiMock;
+  /**
+   * The queue mock.
+   *
+   * @var mixed
+   */
   protected $queueMock;
+  /**
+   * The queue factory mock.
+   *
+   * @var mixed
+   */
   protected $queueFactoryMock;
+  /**
+   * The queued items.
+   *
+   * @var array
+   */
   protected array $queuedItems = [];
 
+  /**
+   * {@inheritdoc}
+   */
   protected function setUp(): void {
     parent::setUp();
 
@@ -86,6 +114,9 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->container->set('unifi_access_sync.api', $this->apiMock);
   }
 
+  /**
+   * Get sync manager.
+   */
   protected function getSyncManager(): UnifiSyncManager {
     return new UnifiSyncManager(
       $this->container->get('entity_type.manager'),
@@ -96,6 +127,9 @@ class UnifiSyncManagerTest extends KernelTestBase {
     );
   }
 
+  /**
+   * Create field.
+   */
   protected function createField($entity_type, $bundle, $field_name, $type, $settings = []): void {
     FieldStorageConfig::create([
       'field_name' => $field_name,
@@ -111,8 +145,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
-   * reconcile() queues a create when a Drupal user is missing from a
-   * non-empty UniFi tenant.
+   * Reconcile() queues a create for a Drupal user missing from UniFi.
    */
   public function testReconcileQueuesCreateForMissingUser(): void {
     $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
@@ -195,7 +228,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
-   * reconcile() aborts cleanly when listUsers fails (API error, not empty).
+   * Reconcile() aborts cleanly when listUsers fails (API error, not empty).
    */
   public function testReconcileAbortsOnListUsersFailure(): void {
     $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
@@ -279,9 +312,10 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
-   * reconcile() queues deletions for stale UniFi users even when
-   * $should is empty (no amplification concern — deletes are bounded
-   * by the current UniFi tenant size).
+   * Reconcile() queues deletions for stale UniFi users once allowed.
+   *
+   * Even when $should is empty there is no amplification concern: deletes
+   * are bounded by the current UniFi tenant size.
    */
   public function testReconcileRemoval(): void {
     $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
@@ -289,6 +323,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
 
     $this->config('unifi_access_sync.settings')
       ->set('door_term_id', $door_term->id())
+      ->set('allow_delete', TRUE)
       ->save();
 
     $this->apiMock->expects($this->once())
@@ -306,7 +341,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
-   * getShouldHaveAccessUserData includes display-name fallback.
+   * GetShouldHaveAccessUserData includes display-name fallback.
    */
   public function testGetShouldHaveAccessUserDataIncludesDisplayName(): void {
     $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
@@ -339,9 +374,33 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
+   * Deletions are only logged until allow_delete is switched on.
+   */
+  public function testReconcileRemovalGatedByDefault(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+    $this->assertFalse((bool) $this->config('unifi_access_sync.settings')->get('allow_delete'));
+
+    $this->apiMock->expects($this->once())
+      ->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'unifi_id_123', 'email' => 'extra@example.com', 'name' => 'Extra User'],
+      ]));
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(0, $this->queuedItems, 'Nothing is queued while allow_delete is off.');
+  }
+
+  /**
    * Targeted add/remove behavior for a single email.
    */
   public function testSyncSingleByEmail(): void {
+    $this->config('unifi_access_sync.settings')->set('allow_delete', TRUE)->save();
     $this->apiMock->expects($this->exactly(2))
       ->method('listUsers')
       ->willReturnOnConsecutiveCalls(
@@ -374,7 +433,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
-   * syncSingleByEmail aborts cleanly when listUsers fails.
+   * SyncSingleByEmail aborts cleanly when listUsers fails.
    */
   public function testSyncSingleByEmailAbortsOnListUsersFailure(): void {
     UnifiSyncManager::resetCache();

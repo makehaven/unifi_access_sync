@@ -2,3 +2,4 @@ api_host: ''
 api_token: ''
 verify_ssl: false
 door_term_id: 0
+allow_delete: false

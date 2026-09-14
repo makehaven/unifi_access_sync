@@ -45,17 +45,18 @@ phpunit -c core web/modules/custom/unifi_access_sync/tests/src/Kernel/UnifiSyncM
 
 3. **Reconciliation Logic** (`UnifiSyncManager::reconcile()`):
    - Compares eligible Drupal emails (`getShouldHaveAccessEmails()`) against UniFi users (`listUsers()`)
-   - Creates missing users, deletes extras
+   - Creates missing users; deletes extras only when `allow_delete` is TRUE (otherwise logs them)
 
 ### Configuration
 
 Settings stored in `unifi_access_sync.settings`, configured via `/admin/config/system/unifi-access-sync`:
 
 - `api_host`: UniFi console URL (e.g., `https://<console-ip>:12445`)
-- `api_token`: Bearer token with user read/write scopes (or use Key module)
+- `api_token`: Access API token (sent as both `Authorization: Bearer` and `X-API-KEY`; port 12445 takes either, UniFi OS on 443 only forwards X-API-KEY)
 - `use_key_module` / `api_key_id`: Optional Key module integration for secure token storage
 - `verify_ssl`: Disable for self-signed certs
 - `door_term_id`: Taxonomy term ID representing Door access
+- `allow_delete`: FALSE by default — reconcile logs "Would delete" instead of queueing deletions until this is on (guards the console's non-Drupal users)
 
 ### Field Dependencies
 

@@ -87,13 +87,13 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     $logger = $this->createMock(LoggerChannelInterface::class);
 
     $api->expects($this->once())
-      ->method('deleteUser')
+      ->method('deactivateUser')
       ->with('u123')
       ->willReturn(UnifiApiResult::success(statusCode: 204));
 
     $logger->expects($this->once())
       ->method('notice')
-      ->with($this->stringContains('deleted successfully via queue'));
+      ->with($this->stringContains('revoked via queue'));
 
     $worker = new UnifiAccessSyncWorker([], 'unifi_access_sync_queue', [], $api, $logger);
     $worker->processItem([
@@ -108,7 +108,7 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     $logger = $this->createMock(LoggerChannelInterface::class);
 
     $api->expects($this->never())->method('createUser');
-    $api->expects($this->never())->method('deleteUser');
+    $api->expects($this->never())->method('deactivateUser');
 
     $logger->expects($this->once())
       ->method('error')
@@ -130,6 +130,34 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     $worker->processItem([
       'action' => 'nope',
       'email' => 'user@example.com',
+    ]);
+  }
+
+
+  /**
+   * The new 'deactivate' action name drains as well as the legacy 'delete'.
+   *
+   * reconcile() now queues 'deactivate'; 'delete' stays accepted so anything
+   * an older release left in the queue still drains.
+   */
+  public function testProcessItemDeactivateActionName(): void {
+    $api = $this->createMock(UnifiApiService::class);
+    $logger = $this->createMock(LoggerChannelInterface::class);
+
+    $api->expects($this->once())
+      ->method('deactivateUser')
+      ->with('u123')
+      ->willReturn(UnifiApiResult::success(statusCode: 200));
+
+    $logger->expects($this->once())
+      ->method('notice')
+      ->with($this->stringContains('revoked via queue'));
+
+    $worker = new UnifiAccessSyncWorker([], 'unifi_access_sync_queue', [], $api, $logger);
+    $worker->processItem([
+      'action' => 'deactivate',
+      'email' => 'remove@example.com',
+      'user_id' => 'u123',
     ]);
   }
 

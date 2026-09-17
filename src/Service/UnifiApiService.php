@@ -19,6 +19,16 @@ use Drupal\key\KeyRepositoryInterface;
 class UnifiApiService {
 
   /**
+   * The `code` value the Developer API uses to mean "this call worked".
+   */
+  private const ENVELOPE_SUCCESS = 'SUCCESS';
+
+  /**
+   * The `status` value that revokes a user's access at the door.
+   */
+  private const STATUS_DEACTIVATED = 'DEACTIVATED';
+
+  /**
    * The HTTP client.
    *
    * @var \GuzzleHttp\ClientInterface
@@ -130,6 +140,65 @@ class UnifiApiService {
   }
 
   /**
+   * Interprets a 2xx response body from the UniFi Access Developer API.
+   *
+   * **This API answers HTTP 200 for most of its errors.** A failed user
+   * creation returns `200 {"code":"CODE_SYSTEM_ERROR","msg":"Server system
+   * error."}`; a wrong path returns `200 {"code":404,"codeS":"CODE_NOT_FOUND",
+   * ...}`. Trusting the status code alone is how 168,763 "created
+   * successfully" log entries were written against a console that gained no
+   * users at all (2026-09-15 → 09-17). Note `code` is a string on some errors
+   * and an integer on others, so the comparison is strict against the literal
+   * success value and everything else is a failure.
+   *
+   * @param int $status
+   *   The HTTP status code (already known to be 2xx).
+   * @param string $body
+   *   The raw response body.
+   * @param string $what
+   *   Short label for log messages, e.g. "createUser".
+   *
+   * @return \Drupal\unifi_access_sync\Service\UnifiApiResult
+   *   Success carries the unwrapped `data` member when the envelope has one.
+   */
+  private function decodeEnvelope(int $status, string $body, string $what): UnifiApiResult {
+    // A 2xx with no body at all (204 No Content on delete, for instance) has
+    // nothing to disagree with, so it stands as success.
+    if (trim($body) === '') {
+      return UnifiApiResult::success(NULL, $status);
+    }
+
+    $json = json_decode($body, TRUE);
+    if (!is_array($json)) {
+      $this->log->error('UniFi @w returned non-JSON. Body: @body', [
+        '@w' => $what,
+        '@body' => $this->trimForLog($body),
+      ]);
+      return UnifiApiResult::failure($what . ' returned non-JSON', $status, $this->trimForLog($body));
+    }
+
+    if (isset($json['code']) && $json['code'] !== self::ENVELOPE_SUCCESS) {
+      $msg = (string) ($json['msg'] ?? $json['code']);
+      $this->log->error('UniFi @w failed inside HTTP @s: @c @msg', [
+        '@w' => $what,
+        '@s' => $status,
+        '@c' => $json['code'],
+        '@msg' => $msg,
+      ]);
+      return UnifiApiResult::failure(
+        $json['code'] . ': ' . $msg,
+        $status,
+        $this->trimForLog($body),
+      );
+    }
+
+    return UnifiApiResult::success(
+      array_key_exists('data', $json) ? $json['data'] : $json,
+      $status,
+    );
+  }
+
+  /**
    * Lists all users from UniFi Access, paginated.
    *
    * On success, result->data is an array of user rows (possibly empty if
@@ -172,14 +241,11 @@ class UnifiApiService {
           );
         }
 
-        $json = json_decode($res->getBody()->getContents(), TRUE);
-        $users = [];
-        if (isset($json['data']) && is_array($json['data'])) {
-          $users = $json['data'];
+        $decoded = $this->decodeEnvelope($statusCode, (string) $res->getBody(), 'listUsers');
+        if (!$decoded->ok) {
+          return $decoded;
         }
-        elseif (is_array($json)) {
-          $users = $json;
-        }
+        $users = is_array($decoded->data) ? $decoded->data : [];
 
         if (empty($users)) {
           break;
@@ -244,10 +310,7 @@ class UnifiApiService {
           responseBody: $body,
         );
       }
-      return UnifiApiResult::success(
-        data: json_decode($res->getBody()->getContents(), TRUE),
-        statusCode: $statusCode,
-      );
+      return $this->decodeEnvelope($statusCode, (string) $res->getBody(), 'createUser');
     }
     catch (RequestException $e) {
       $response = $e->getResponse();
@@ -271,41 +334,54 @@ class UnifiApiService {
   }
 
   /**
-   * Deletes a user from UniFi Access.
+   * Revokes a user's access by deactivating them in UniFi Access.
+   *
+   * **Not a delete.** `DELETE /users/{id}` answers
+   * `200 {"code":"CODE_SYSTEM_ERROR"}` on this console — it is not a
+   * supported operation, and the previous status-only success check reported
+   * those refusals as "deleted successfully". `PUT /users/{id}` with
+   * `{"status":"DEACTIVATED"}` is the operation that actually works, and it
+   * is the better one anyway: it revokes access at the door while preserving
+   * the console's audit history for that person.
    */
-  public function deleteUser(string $id): UnifiApiResult {
+  public function deactivateUser(string $id): UnifiApiResult {
     if (!$this->isConfigured()) {
       $this->log->warning('UniFi API not configured: missing api_host or token.');
       return UnifiApiResult::failure('UniFi API not configured (missing host or token).');
     }
 
     try {
-      $res = $this->http->request('DELETE', $this->base() . '/users/' . $id, [
+      $res = $this->http->request('PUT', $this->base() . '/users/' . $id, [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
+        'json' => ['status' => self::STATUS_DEACTIVATED],
         'timeout' => 20,
       ]);
 
       $statusCode = $res->getStatusCode();
       if ($statusCode < 200 || $statusCode >= 300) {
         $body = $this->trimForLog((string) $res->getBody());
-        $this->log->error('UniFi deleteUser returned HTTP @code. Response: @body', [
+        $this->log->error('UniFi deactivateUser returned HTTP @code. Response: @body', [
           '@code' => $statusCode,
           '@body' => $body,
         ]);
         return UnifiApiResult::failure(
-          errorMessage: 'deleteUser non-2xx response',
+          errorMessage: 'deactivateUser non-2xx response',
           statusCode: $statusCode,
           responseBody: $body,
         );
       }
-      return UnifiApiResult::success(statusCode: $statusCode);
+      // Same trap as createUser: a refused delete comes back 200 with an
+      // error envelope. Reporting that as success would leave a revoked
+      // member present in the console with their door access intact, which
+      // is the failure direction that actually matters here.
+      return $this->decodeEnvelope($statusCode, (string) $res->getBody(), 'deactivateUser');
     }
     catch (RequestException $e) {
       $response = $e->getResponse();
       $statusCode = $response?->getStatusCode();
       $body = $response ? $this->trimForLog((string) $response->getBody()) : NULL;
-      $this->log->error('UniFi deleteUser HTTP error @code: @m. Body: @body', [
+      $this->log->error('UniFi deactivateUser HTTP error @code: @m. Body: @body', [
         '@code' => $statusCode ?? 'n/a',
         '@m' => $e->getMessage(),
         '@body' => $body ?? '',
@@ -317,7 +393,7 @@ class UnifiApiService {
       );
     }
     catch (\Throwable $e) {
-      $this->log->error('UniFi deleteUser exception: @m', ['@m' => $e->getMessage()]);
+      $this->log->error('UniFi deactivateUser exception: @m', ['@m' => $e->getMessage()]);
       return UnifiApiResult::failure(errorMessage: 'Exception: ' . $e->getMessage());
     }
   }
@@ -339,12 +415,19 @@ class UnifiApiService {
       $last = implode(' ', $parts) ?: '.';
     }
 
+    // Flat, NOT nested under a `profile` key, and the email goes in
+    // `user_email` rather than `email`. All three facts were established by
+    // probing the live console on 2026-09-17:
+    //   - the old nested shape returned `{"code":"CODE_SYSTEM_ERROR"}`;
+    //   - flat with `email` returned `{"code":"CODE_PARAMS_INVALID"}`;
+    //   - flat with `user_email` returned `{"code":"SUCCESS"}`.
+    // `email` is read-only on this endpoint — a created user comes back with
+    // `email: ""` and the address in `user_email`. `user_email` is also
+    // unique: a duplicate is refused with `CODE_ADMIN_EMAIL_EXIST`.
     return [
-      'profile' => [
-        'email' => $email,
-        'first_name' => $first,
-        'last_name' => $last,
-      ],
+      'user_email' => $email,
+      'first_name' => $first,
+      'last_name' => $last,
     ];
   }
 

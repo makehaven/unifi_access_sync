@@ -75,18 +75,24 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
           }
           break;
 
+        // 'delete' is the historical action name and is still accepted so
+        // that any item queued by an older release drains correctly. The
+        // operation itself is a deactivation — see
+        // UnifiApiService::deactivateUser() for why a real delete is not
+        // available on this console.
         case 'delete':
+        case 'deactivate':
           if (!$user_id) {
-            $this->logger->error('Cannot delete UniFi user @e: Missing user ID.', ['@e' => $email]);
+            $this->logger->error('Cannot revoke UniFi access for @e: Missing user ID.', ['@e' => $email]);
             break;
           }
-          $result = $this->api->deleteUser($user_id);
+          $result = $this->api->deactivateUser($user_id);
           if ($result->ok) {
-            $this->logger->notice('UniFi user @e (ID: @id) deleted successfully via queue.', ['@e' => $email, '@id' => $user_id]);
+            $this->logger->notice('UniFi access for @e (ID: @id) revoked via queue.', ['@e' => $email, '@id' => $user_id]);
           }
           else {
             $this->logger->error(
-              'Failed to delete UniFi user @e (ID: @id) via queue: @reason',
+              'Failed to revoke UniFi access for @e (ID: @id) via queue: @reason',
               ['@e' => $email, '@id' => $user_id, '@reason' => $result->describe()]
             );
           }

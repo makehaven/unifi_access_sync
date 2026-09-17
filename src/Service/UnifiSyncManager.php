@@ -13,6 +13,16 @@ use Drupal\Core\Queue\QueueFactory;
 class UnifiSyncManager {
 
   /**
+   * Smallest share of expected members the console may hold before we refuse.
+   *
+   * If UniFi reports fewer than this fraction of the members Drupal expects,
+   * reconcile treats the console view as untrustworthy and enqueues nothing.
+   * See the amplification note on reconcile() for why an emptiness test was
+   * not enough.
+   */
+  private const MIN_PRESENT_RATIO = 0.5;
+
+  /**
    * The etm.
    *
    * @var \Drupal\Core\Entity\EntityTypeManagerInterface
@@ -76,15 +86,31 @@ class UnifiSyncManager {
   /**
    * Reconciles Drupal members with UniFi Access users.
    *
-   * Safety valve: we detect "UniFi said empty while Drupal expects many users"
-   * and refuse to enqueue anything in that case. Without this guard, a
-   * transient API failure (expired token, network blip) causes listUsers()
-   * to return empty, which makes every door-badged Drupal member look
-   * "missing" from UniFi — and since cron runs hourly, the full member
-   * roster gets re-queued each hour while the API is down. That's how a
-   * half-million-item queue happens.
+   * Safety valve: if UniFi reports implausibly few users relative to what
+   * Drupal expects, we refuse to enqueue anything. Without this guard a bad
+   * console view makes every door-badged member look "missing", and since
+   * cron runs hourly the full roster gets re-queued every hour.
+   *
+   * **This guard previously tested for an empty list and that was not
+   * enough.** Between 2026-09-15 and 09-17 the console answered 200 with 23
+   * users while Drupal expected 3,309. Twenty-three is not zero, so the valve
+   * never opened: every hour re-queued ~3,294 creates, producing 340,234 log
+   * rows in 61 hours and ~170,000 futile writes at the door. A ratio test
+   * catches that case and still catches the empty one.
+   *
+   * The valve is also the backstop for systematically failing creates — if
+   * creates stop working for any reason, the console never fills, the ratio
+   * stays low, and the second run arrests instead of looping forever.
+   *
+   * A genuinely empty or sparse console (first-ever sync, or a rebuilt
+   * console) is a real case and is served by $force, which the operator
+   * supplies through `drush unifi:sync --force` after confirming that the
+   * console really is the one we mean to fill.
+   *
+   * @param bool $force
+   *   TRUE to bypass the ratio valve. Never set from cron.
    */
-  public function reconcile(): void {
+  public function reconcile(bool $force = FALSE): void {
     $door_tid = (int) $this->cfg->get('door_term_id');
     if (!$door_tid) {
       $this->log->warning('UniFi sync aborted: door_term_id is not configured.');
@@ -103,25 +129,34 @@ class UnifiSyncManager {
     }
     $have = $fetch->data ?? [];
 
-    // Amplification safety valve: non-empty expectations + empty tenant view
-    // is almost always a setup or bootstrap issue (wrong door_term_id, wrong
-    // UniFi console, empty response body from a 2xx that should have returned
-    // data). Skipping enqueue here keeps a handful-of-failures problem from
-    // becoming a half-million-failures problem.
-    if (!empty($should) && empty($have)) {
-      $this->log->warning(
-        'UniFi sync aborted: listUsers returned zero users while @n Drupal members expect access. '
-        . 'Treating as setup/bootstrap issue. If UniFi is legitimately empty (fresh install), '
-        . 'clear unifi_access_sync_queue and run drush unifi:sync after confirming the console has been provisioned.',
-        ['@n' => count($should)]
+    // Amplification safety valve. An implausibly small tenant view is almost
+    // always a setup, connectivity or API problem (wrong door_term_id, wrong
+    // console, a 2xx error envelope, creates silently failing) rather than
+    // 3,000 members genuinely needing to be added this hour. Refusing here
+    // keeps a handful-of-failures problem from becoming a
+    // hundreds-of-thousands-of-failures problem.
+    if (!$force && !$this->tenantViewIsPlausible(count($should), count($have))) {
+      $this->log->error(
+        'UniFi sync aborted: console reported @have users while @n Drupal members expect access '
+        . '(below the @pct percent floor). Nothing was enqueued and nothing will be until this is resolved. '
+        . 'Check that api_host points at the intended console, that listUsers is not returning an '
+        . 'error envelope inside an HTTP 200, and that recent createUser calls actually succeeded. '
+        . 'If the console really is meant to be this empty (fresh install, rebuilt console), run '
+        . 'drush unifi:sync --force once to seed it.',
+        [
+          '@have' => count($have),
+          '@n' => count($should),
+          '@pct' => (int) round(self::MIN_PRESENT_RATIO * 100),
+        ]
       );
       return;
     }
 
     $queue = $this->queueFactory->get('unifi_access_sync_queue');
 
-    foreach ($should as $email => $data) {
-      if (!isset($have[$email])) {
+    foreach ($should as $key => $data) {
+      if (!isset($have[$key])) {
+        $email = $data['email'] ?? $key;
         $this->log->notice('Queueing UniFi user creation for @e', ['@e' => $email]);
         $queue->createItem([
           'action' => 'create',
@@ -133,12 +168,12 @@ class UnifiSyncManager {
     foreach ($have as $email => $user) {
       if (!isset($should[$email]) && !empty($user['id'])) {
         if (!$this->deletesAllowed()) {
-          $this->log->notice('Would delete UniFi user @e (not door-badged in Drupal) — deletions are disabled (allow_delete).', ['@e' => $email]);
+          $this->log->notice('Would revoke UniFi access for @e (not door-badged in Drupal) — revocation is disabled (allow_delete).', ['@e' => $email]);
           continue;
         }
-        $this->log->notice('Queueing UniFi user deletion for @e', ['@e' => $email]);
+        $this->log->notice('Queueing UniFi access revocation for @e', ['@e' => $email]);
         $queue->createItem([
-          'action' => 'delete',
+          'action' => 'deactivate',
           'email' => $email,
           'user_id' => $user['id'],
         ]);
@@ -163,7 +198,9 @@ class UnifiSyncManager {
       return;
     }
     $have = $fetch->data ?? [];
-    $exists = isset($have[$email]);
+    // The UniFi side is indexed lowercase; match on the same footing.
+    $key = mb_strtolower($email);
+    $exists = isset($have[$key]);
 
     $queue = $this->queueFactory->get('unifi_access_sync_queue');
 
@@ -175,16 +212,16 @@ class UnifiSyncManager {
         'user_data' => $user_data,
       ]);
     }
-    elseif (!$should_have && $exists && !empty($have[$email]['id'])) {
+    elseif (!$should_have && $exists && !empty($have[$key]['id'])) {
       if (!$this->deletesAllowed()) {
-        $this->log->notice('Would delete UniFi user @e — deletions are disabled (allow_delete).', ['@e' => $email]);
+        $this->log->notice('Would revoke UniFi access for @e — revocation is disabled (allow_delete).', ['@e' => $email]);
         return;
       }
-      $this->log->notice('Queueing single UniFi user deletion for @e', ['@e' => $email]);
+      $this->log->notice('Queueing single UniFi access revocation for @e', ['@e' => $email]);
       $queue->createItem([
-        'action' => 'delete',
+        'action' => 'deactivate',
         'email' => $email,
-        'user_id' => $have[$email]['id'],
+        'user_id' => $have[$key]['id'],
       ]);
     }
   }
@@ -238,7 +275,11 @@ class UnifiSyncManager {
     foreach ($users as $u) {
       $email = (string) $u->getEmail();
       if ($email) {
-        $result[$email] = [
+        // Keyed lowercase so it compares against the UniFi side, which is
+        // also lowercased; `email` keeps the address as the member actually
+        // has it, and that is what gets sent to the API.
+        $result[mb_strtolower($email)] = [
+          'email' => $email,
           'first_name' => (string) ($u->get('field_first_name')->value ?? ''),
           'last_name' => (string) ($u->get('field_last_name')->value ?? ''),
           'display_name' => (string) $u->getDisplayName(),
@@ -246,6 +287,29 @@ class UnifiSyncManager {
       }
     }
     return $result;
+  }
+
+  /**
+   * Decides whether the console's user list is plausible enough to act on.
+   *
+   * Returns TRUE when nothing is expected (nothing to amplify), and otherwise
+   * requires the console to hold at least MIN_PRESENT_RATIO of the expected
+   * roster. Deliberately a ratio and not a count: the failure this prevents
+   * is proportional to the roster size, so the threshold has to be too.
+   *
+   * @param int $expected
+   *   How many members Drupal believes should have access.
+   * @param int $present
+   *   How many users the console returned.
+   *
+   * @return bool
+   *   TRUE when it is safe to enqueue.
+   */
+  private function tenantViewIsPlausible(int $expected, int $present): bool {
+    if ($expected <= 0) {
+      return TRUE;
+    }
+    return $present >= (int) ceil($expected * self::MIN_PRESENT_RATIO);
   }
 
   /**
@@ -269,13 +333,26 @@ class UnifiSyncManager {
     }
     $map = [];
     foreach ((array) $result->data as $u) {
-      // UniFi Access local API typically nests email under 'profile'.
-      $email = $u['email'] ?? ($u['profile']['email'] ?? NULL);
-      if ($email) {
-        $map[$email] = [
-          'id' => $u['id'] ?? ($u['_id'] ?? NULL),
-          'raw' => $u,
-        ];
+      // A user carries TWO email fields and which one is populated depends on
+      // how they were created. Users added in the console UI have `email`;
+      // users created through this API have `email: ""` and the address in
+      // `user_email`, because `email` is read-only on the create endpoint.
+      //
+      // Reading only `email` is why the 2026-09-15 loop could not have healed
+      // itself even once creates started working: every user this module
+      // created would still have looked missing on the next pass, and been
+      // created again. Both keys are indexed, lowercased, so the comparison
+      // against Drupal's addresses is case-insensitive on both sides.
+      $id = $u['id'] ?? ($u['_id'] ?? NULL);
+      $addresses = [
+        $u['user_email'] ?? NULL,
+        $u['email'] ?? NULL,
+        $u['profile']['email'] ?? NULL,
+      ];
+      foreach ($addresses as $email) {
+        if (is_string($email) && $email !== '') {
+          $map[mb_strtolower($email)] = ['id' => $id, 'raw' => $u];
+        }
       }
     }
     self::$userCache = $map;

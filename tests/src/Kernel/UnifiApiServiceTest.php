@@ -170,7 +170,7 @@ class UnifiApiServiceTest extends KernelTestBase {
   }
 
   /**
-   * Tests createUser and deleteUser success and error handling.
+   * Tests createUser and deactivateUser success and error handling.
    */
   public function testCreateAndDeleteUser(): void {
     $this->config('unifi_access_sync.settings')
@@ -195,21 +195,21 @@ class UnifiApiServiceTest extends KernelTestBase {
     );
 
     // Success create.
-    $result = $apiService->createUser(['profile' => ['email' => 'new@example.com']]);
+    $result = $apiService->createUser(['user_email' => 'new@example.com']);
     $this->assertTrue($result->ok);
     $this->assertEquals('new_id', $result->data['id']);
 
     // Error create.
-    $result = $apiService->createUser(['profile' => ['email' => 'error@example.com']]);
+    $result = $apiService->createUser(['user_email' => 'error@example.com']);
     $this->assertFalse($result->ok);
     $this->assertSame(500, $result->statusCode);
 
     // Success delete.
-    $result = $apiService->deleteUser('new_id');
+    $result = $apiService->deactivateUser('new_id');
     $this->assertTrue($result->ok);
 
     // Error delete.
-    $result = $apiService->deleteUser('missing_id');
+    $result = $apiService->deactivateUser('missing_id');
     $this->assertFalse($result->ok);
     $this->assertSame(404, $result->statusCode);
     $this->assertSame('Not Found', $result->responseBody);
@@ -235,7 +235,207 @@ class UnifiApiServiceTest extends KernelTestBase {
 
     $this->assertFalse($apiService->listUsers()->ok);
     $this->assertFalse($apiService->createUser(['profile' => ['email' => 'test@example.com']])->ok);
-    $this->assertFalse($apiService->deleteUser('abc123')->ok);
+    $this->assertFalse($apiService->deactivateUser('abc123')->ok);
+  }
+
+
+  /**
+   * A 2xx carrying an error envelope is a failure, not a success.
+   *
+   * This is the exact response live returned 168,763 times between
+   * 2026-09-15 and 09-17 while logging "created successfully": HTTP 200 with
+   * {"code":"CODE_SYSTEM_ERROR","msg":"Server system error."}. Status-only
+   * success checking is what made a total failure look like a working sync.
+   */
+  public function testCreateUserRejectsErrorEnvelopeInsideHttp200(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $mock = new MockHandler([
+      new Response(200, [], json_encode([
+        'code' => 'CODE_SYSTEM_ERROR',
+        'msg' => 'Server system error.',
+      ])),
+    ]);
+    $apiService = new UnifiApiService(
+      new Client(['handler' => HandlerStack::create($mock)]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $result = $apiService->createUser(['email' => 'nope@example.com']);
+
+    $this->assertFalse($result->ok, 'HTTP 200 with an error code must not count as success.');
+    $this->assertSame(200, $result->statusCode);
+    $this->assertStringContainsString('CODE_SYSTEM_ERROR', $result->describe());
+    $this->assertStringContainsString('Server system error.', $result->describe());
+  }
+
+  /**
+   * The envelope's `code` is an integer on some errors and a string on others.
+   *
+   * Live returned {"code":404,"codeS":"CODE_NOT_FOUND",...} on 2026-09-14, so
+   * the check has to catch a numeric code as well as a symbolic one.
+   */
+  public function testEnvelopeRejectsNumericErrorCode(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $mock = new MockHandler([
+      new Response(200, [], json_encode([
+        'code' => 404,
+        'codeS' => 'CODE_NOT_FOUND',
+        'msg' => 'The API was not found.',
+      ])),
+    ]);
+    $apiService = new UnifiApiService(
+      new Client(['handler' => HandlerStack::create($mock)]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $result = $apiService->createUser(['email' => 'nope@example.com']);
+
+    $this->assertFalse($result->ok);
+    $this->assertStringContainsString('The API was not found.', $result->describe());
+  }
+
+  /**
+   * A refused delete must not report success.
+   *
+   * This is the direction that matters: a silently-failed delete leaves a
+   * revoked member present in the console with their door access intact.
+   */
+  public function testDeleteUserRejectsErrorEnvelopeInsideHttp200(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $mock = new MockHandler([
+      new Response(200, [], json_encode([
+        'code' => 'CODE_OPERATION_FORBIDDEN',
+        'msg' => 'Not allowed.',
+      ])),
+    ]);
+    $apiService = new UnifiApiService(
+      new Client(['handler' => HandlerStack::create($mock)]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $result = $apiService->deactivateUser('some_id');
+
+    $this->assertFalse($result->ok, 'A refused delete must never report success.');
+    $this->assertStringContainsString('CODE_OPERATION_FORBIDDEN', $result->describe());
+  }
+
+  /**
+   * An explicit SUCCESS envelope unwraps `data` and still counts as success.
+   */
+  public function testEnvelopeUnwrapsDataOnSuccessCode(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $mock = new MockHandler([
+      new Response(200, [], json_encode([
+        'code' => 'SUCCESS',
+        'msg' => 'success',
+        'data' => ['id' => 'created_id', 'email' => 'yes@example.com'],
+      ])),
+    ]);
+    $apiService = new UnifiApiService(
+      new Client(['handler' => HandlerStack::create($mock)]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $result = $apiService->createUser(['email' => 'yes@example.com']);
+
+    $this->assertTrue($result->ok);
+    $this->assertSame('created_id', $result->data['id']);
+  }
+
+  /**
+   * listUsers must surface an error envelope rather than read it as "empty".
+   *
+   * An error envelope decoded as an empty user list is worse than a failure:
+   * reconcile() would treat it as a legitimately empty console.
+   */
+  public function testListUsersRejectsErrorEnvelopeInsideHttp200(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $mock = new MockHandler([
+      new Response(200, [], json_encode([
+        'code' => 'CODE_AUTH_FAILED',
+        'msg' => 'Unauthorized.',
+      ])),
+    ]);
+    $apiService = new UnifiApiService(
+      new Client(['handler' => HandlerStack::create($mock)]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $result = $apiService->listUsers();
+
+    $this->assertFalse($result->ok, 'An error envelope must not look like an empty tenant.');
+    $this->assertStringContainsString('CODE_AUTH_FAILED', $result->describe());
+  }
+
+  /**
+   * The create payload is flat, matching what listUsers returns.
+   *
+   * Established by probing the live console on 2026-09-17: nested returned
+   * CODE_SYSTEM_ERROR, flat with `email` returned CODE_PARAMS_INVALID, and
+   * flat with `user_email` returned SUCCESS.
+   */
+  public function testUserPayloadIsFlat(): void {
+    $apiService = new UnifiApiService(
+      new Client(),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $payload = $apiService->userPayloadForData('someone@example.com', [
+      'first_name' => 'Some',
+      'last_name' => 'One',
+      'display_name' => 'Some One',
+    ]);
+
+    $this->assertArrayNotHasKey('profile', $payload, 'Payload must not nest under profile.');
+    $this->assertArrayNotHasKey('email', $payload, '`email` is read-only on create; the address goes in user_email.');
+    $this->assertSame('someone@example.com', $payload['user_email']);
+    $this->assertSame('Some', $payload['first_name']);
+    $this->assertSame('One', $payload['last_name']);
+  }
+
+  /**
+   * A 2xx with an empty body (204 No Content) is still a success.
+   */
+  public function testEmptyBodyOnTwoXxIsSuccess(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $mock = new MockHandler([new Response(204, [], '')]);
+    $apiService = new UnifiApiService(
+      new Client(['handler' => HandlerStack::create($mock)]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $this->assertTrue($apiService->deactivateUser('some_id')->ok);
   }
 
 }

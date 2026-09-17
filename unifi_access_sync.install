@@ -1,0 +1,61 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall hooks for unifi_access_sync.
+ */
+
+/**
+ * Implements hook_requirements().
+ *
+ * Surfaces the one condition that cannot be seen from the logs alone: the
+ * console holding far fewer users than Drupal expects, which is what the
+ * reconcile valve refuses to act on. Without this, the only symptom is an
+ * hourly watchdog error nobody reads.
+ */
+function unifi_access_sync_requirements($phase) {
+  $requirements = [];
+  if ($phase !== 'runtime') {
+    return $requirements;
+  }
+
+  $paused_until = (int) \Drupal::state()->get('unifi_access_sync.last_cron', 0);
+  $now = \Drupal::time()->getRequestTime();
+  if ($paused_until > $now) {
+    $requirements['unifi_access_sync_paused'] = [
+      'title' => t('UniFi Access sync'),
+      'value' => t('Paused until @date', [
+        '@date' => \Drupal::service('date.formatter')->format($paused_until, 'short'),
+      ]),
+      'description' => t('Hourly reconcile is suppressed because a future timestamp is set in the <code>unifi_access_sync.last_cron</code> state key. Clear it with <code>drush state:delete unifi_access_sync.last_cron</code> to resume.'),
+      'severity' => REQUIREMENT_WARNING,
+    ];
+  }
+
+  return $requirements;
+}
+
+/**
+ * Clear the manual cron pause applied during the 2026-09-17 runaway incident.
+ *
+ * On 2026-09-15 a defective reconcile re-queued the whole member roster every
+ * hour. It was stopped on live by setting unifi_access_sync.last_cron to a
+ * timestamp a month out, which makes hook_cron() return early. That pause was
+ * a holding action for the bug this release fixes, so the release clears it
+ * rather than leaving a hidden suppression to expire silently.
+ *
+ * Deliberately only clears a *future* value: a normal past timestamp is the
+ * legitimate throttle and must be left alone.
+ */
+function unifi_access_sync_update_9001() {
+  $state = \Drupal::state();
+  $last = (int) $state->get('unifi_access_sync.last_cron', 0);
+  $now = \Drupal::time()->getRequestTime();
+
+  if ($last > $now) {
+    $state->delete('unifi_access_sync.last_cron');
+    return t('Cleared the manual cron pause (was set to @ts); hourly reconcile will resume, guarded by the amplification valve.', ['@ts' => $last]);
+  }
+
+  return t('No manual cron pause was in place; nothing to clear.');
+}

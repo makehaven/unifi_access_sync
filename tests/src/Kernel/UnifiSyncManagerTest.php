@@ -335,7 +335,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->getSyncManager()->reconcile();
 
     $this->assertCount(1, $this->queuedItems);
-    $this->assertSame('delete', $this->queuedItems[0]['action']);
+    $this->assertSame('deactivate', $this->queuedItems[0]['action']);
     $this->assertSame('extra@example.com', $this->queuedItems[0]['email']);
     $this->assertSame('unifi_id_123', $this->queuedItems[0]['user_id']);
   }
@@ -427,7 +427,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $sync_manager->syncSingleByEmail('remove@example.com', FALSE);
 
     $this->assertCount(2, $this->queuedItems);
-    $this->assertSame('delete', $this->queuedItems[1]['action']);
+    $this->assertSame('deactivate', $this->queuedItems[1]['action']);
     $this->assertSame('remove@example.com', $this->queuedItems[1]['email']);
     $this->assertSame('u1', $this->queuedItems[1]['user_id']);
   }
@@ -450,6 +450,262 @@ class UnifiSyncManagerTest extends KernelTestBase {
     ]);
 
     $this->assertCount(0, $this->queuedItems);
+  }
+
+
+  /**
+   * The 2026-09-15 incident, reproduced: 23 present against a large roster.
+   *
+   * The old valve tested `empty($have)`. Live returned 23 users while Drupal
+   * expected 3,309, so the valve never opened and every hourly cron re-queued
+   * the whole roster — 340,234 log rows in 61 hours. A ratio test arrests it
+   * on the first run. Scaled down here (40 expected, 5 present) because the
+   * predicate is proportional, not absolute.
+   */
+  public function testReconcileValveFiresWhenTenantIsImplausiblySmall(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+
+    $expected_emails = [];
+    for ($i = 1; $i <= 40; $i++) {
+      $email = "member$i@example.com";
+      $expected_emails[] = $email;
+      $user = User::create(['name' => "Member $i", 'mail' => $email]);
+      $user->save();
+      Node::create([
+        'type' => 'badge_request',
+        'title' => "Request for Member $i",
+        'field_badge_requested' => $door_term->id(),
+        'field_badge_status' => 'active',
+        'field_member_to_badge' => $user->id(),
+      ])->save();
+    }
+
+    UnifiSyncManager::resetCache();
+
+    // The console only knows about 5 of the 40 — well under the 50% floor.
+    $present = [];
+    for ($i = 1; $i <= 5; $i++) {
+      $present[] = ['id' => "u$i", 'email' => "member$i@example.com"];
+    }
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: $present));
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(
+      0,
+      $this->queuedItems,
+      'A tenant view holding far fewer users than expected must enqueue nothing.'
+    );
+  }
+
+  /**
+   * --force is the documented escape hatch for a genuinely empty console.
+   *
+   * Seeding a fresh or rebuilt console is a real operation and must remain
+   * possible; it just has to be a deliberate human act rather than something
+   * cron can stumble into.
+   */
+  public function testReconcileForceBypassesTheValve(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+
+    for ($i = 1; $i <= 10; $i++) {
+      $user = User::create(['name' => "Member $i", 'mail' => "member$i@example.com"]);
+      $user->save();
+      Node::create([
+        'type' => 'badge_request',
+        'title' => "Request for Member $i",
+        'field_badge_requested' => $door_term->id(),
+        'field_badge_status' => 'active',
+        'field_member_to_badge' => $user->id(),
+      ])->save();
+    }
+
+    UnifiSyncManager::resetCache();
+
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: []));
+
+    $this->getSyncManager()->reconcile(TRUE);
+
+    $this->assertCount(10, $this->queuedItems, '--force must seed an empty console.');
+    foreach ($this->queuedItems as $item) {
+      $this->assertSame('create', $item['action']);
+    }
+  }
+
+  /**
+   * A tenant view at the floor is still acted on.
+   *
+   * The valve must not be so eager that ordinary growth trips it — half the
+   * roster present is enough to believe the console is the right one.
+   */
+  public function testReconcileProceedsWhenTenantIsAtTheFloor(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+
+    for ($i = 1; $i <= 10; $i++) {
+      $user = User::create(['name' => "Member $i", 'mail' => "member$i@example.com"]);
+      $user->save();
+      Node::create([
+        'type' => 'badge_request',
+        'title' => "Request for Member $i",
+        'field_badge_requested' => $door_term->id(),
+        'field_badge_status' => 'active',
+        'field_member_to_badge' => $user->id(),
+      ])->save();
+    }
+
+    UnifiSyncManager::resetCache();
+
+    // Exactly half present: 5 of 10.
+    $present = [];
+    for ($i = 1; $i <= 5; $i++) {
+      $present[] = ['id' => "u$i", 'email' => "member$i@example.com"];
+    }
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: $present));
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(5, $this->queuedItems, 'At the floor, the missing half should still be queued.');
+  }
+
+
+  /**
+   * A user this module created is recognised on the next pass.
+   *
+   * API-created users come back with `email: ""` and the address in
+   * `user_email`. The matcher used to read only `email`, so every user this
+   * module created still looked missing on the next reconcile and was created
+   * again — the loop could not have healed itself even once creates worked.
+   */
+  public function testReconcileMatchesUsersByUserEmail(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+
+    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user->save();
+    Node::create([
+      'type' => 'badge_request',
+      'title' => 'Request for Test User',
+      'field_badge_requested' => $door_term->id(),
+      'field_badge_status' => 'active',
+      'field_member_to_badge' => $user->id(),
+    ])->save();
+
+    UnifiSyncManager::resetCache();
+
+    // Exactly what the console returns for a user this module created.
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        [
+          'id' => 'created_by_us',
+          'email' => '',
+          'user_email' => 'test@example.com',
+          'first_name' => 'Test',
+          'last_name' => 'User',
+        ],
+      ]));
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(
+      0,
+      $this->queuedItems,
+      'A user already present under user_email must not be created again.'
+    );
+  }
+
+  /**
+   * Address casing must not cause a duplicate create.
+   *
+   * Drupal stores whatever the member typed; the console echoes back its own
+   * casing. Comparing them raw would make "Test@Example.com" look absent.
+   */
+  public function testReconcileMatchIsCaseInsensitive(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+
+    $user = User::create(['name' => 'Mixed Case', 'mail' => 'Mixed.Case@Example.com']);
+    $user->save();
+    Node::create([
+      'type' => 'badge_request',
+      'title' => 'Request for Mixed Case',
+      'field_badge_requested' => $door_term->id(),
+      'field_badge_status' => 'active',
+      'field_member_to_badge' => $user->id(),
+    ])->save();
+
+    UnifiSyncManager::resetCache();
+
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u1', 'user_email' => 'mixed.case@example.com'],
+      ]));
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(0, $this->queuedItems, 'Casing alone must not trigger a duplicate create.');
+  }
+
+  /**
+   * The address sent to the API keeps the member's own casing.
+   *
+   * Matching is lowercased; what we transmit should not be.
+   */
+  public function testCreateCarriesTheMembersOwnAddressCasing(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+
+    $user = User::create(['name' => 'Mixed Case', 'mail' => 'Mixed.Case@Example.com']);
+    $user->save();
+    Node::create([
+      'type' => 'badge_request',
+      'title' => 'Request for Mixed Case',
+      'field_badge_requested' => $door_term->id(),
+      'field_badge_status' => 'active',
+      'field_member_to_badge' => $user->id(),
+    ])->save();
+
+    UnifiSyncManager::resetCache();
+
+    // Console holds an unrelated user, so the valve does not fire.
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'other', 'user_email' => 'someone.else@example.com'],
+      ]));
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(1, $this->queuedItems);
+    $this->assertSame('Mixed.Case@Example.com', $this->queuedItems[0]['email']);
   }
 
 }

@@ -88,18 +88,28 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
           }
           $result = $this->api->deactivateUser($user_id);
           if ($result->ok) {
-            $this->logger->notice('UniFi access for @e (ID: @id) revoked via queue.', ['@e' => $email, '@id' => $user_id]);
+            $this->logger->notice('UniFi access for @e (ID: @id) revoked via queue.', [
+              '@e' => $email,
+              '@id' => $user_id,
+            ]);
           }
           else {
             $this->logger->error(
               'Failed to revoke UniFi access for @e (ID: @id) via queue: @reason',
-              ['@e' => $email, '@id' => $user_id, '@reason' => $result->describe()]
+              [
+                '@e' => $email,
+                '@id' => $user_id,
+                '@reason' => $result->describe(),
+              ]
             );
           }
           break;
 
         default:
-          $this->logger->warning('Unknown UniFi sync action "@action" for user @e.', ['@action' => $action, '@e' => $email]);
+          $this->logger->warning('Unknown UniFi sync action "@action" for user @e.', [
+            '@action' => $action,
+            '@e' => $email,
+          ]);
           break;
       }
     }

@@ -1,0 +1,11 @@
+# Drush 13 discovers commands from this file, NOT from the module's main
+# services.yml. The command was declared there until 2026-09-17, which meant
+# `drush unifi:sync` had never existed despite being documented — and that is
+# the path an operator needs for `--force` when seeding a console.
+services:
+  unifi_access_sync.commands:
+    class: Drupal\unifi_access_sync\Commands\UnifiAccessSyncCommands
+    arguments:
+      - '@unifi_access_sync.sync_manager'
+    tags:
+      - { name: drush.command }

@@ -418,9 +418,9 @@ class UnifiApiService {
     // Flat, NOT nested under a `profile` key, and the email goes in
     // `user_email` rather than `email`. All three facts were established by
     // probing the live console on 2026-09-17:
-    //   - the old nested shape returned `{"code":"CODE_SYSTEM_ERROR"}`;
-    //   - flat with `email` returned `{"code":"CODE_PARAMS_INVALID"}`;
-    //   - flat with `user_email` returned `{"code":"SUCCESS"}`.
+    // - the old nested shape returned `{"code":"CODE_SYSTEM_ERROR"}`;
+    // - flat with `email` returned `{"code":"CODE_PARAMS_INVALID"}`;
+    // - flat with `user_email` returned `{"code":"SUCCESS"}`.
     // `email` is read-only on this endpoint — a created user comes back with
     // `email: ""` and the address in `user_email`. `user_email` is also
     // unique: a duplicate is refused with `CODE_ADMIN_EMAIL_EXIST`.

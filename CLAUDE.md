@@ -115,6 +115,27 @@ failure direction that matters most: the old status-only check reported those
 refusals as "deleted successfully", so a revoked member would have kept their
 door access with a log line saying otherwise.
 
+## Two independent controls — do not conflate them
+
+`sync_enabled` (config, **ships FALSE**) answers *do we want this module talking
+to the door appliance at all*. `MIN_PRESENT_RATIO` (the valve) answers *is the
+console's view trustworthy right now*. The switch is checked first, before any
+API call, in both `reconcile()` and `syncSingleByEmail()`.
+
+`drush unifi:sync --force` bypasses **the valve only**. A Drush flag is not
+consent to start writing at the door, so it will not override the switch — that
+is a config change someone makes deliberately.
+
+`drush unifi:status` answers the whole question read-only in one command: the
+switch, expected vs present, the valve floor, and exactly how many creates
+turning it on would cause. Prefer it over reading watchdog, and run it before
+flipping anything.
+
+`hook_requirements()` reports the switch and the valve on the status report,
+reading the last reconcile's recorded result from state rather than calling the
+API — a 20s timeout on a page load is not worth a number `reconcile()` already
+computed. It is silent when healthy.
+
 ## The amplification valve
 
 `reconcile()` refuses to enqueue anything when the console holds less than

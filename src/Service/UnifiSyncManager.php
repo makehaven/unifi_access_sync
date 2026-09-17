@@ -111,6 +111,13 @@ class UnifiSyncManager {
    *   TRUE to bypass the ratio valve. Never set from cron.
    */
   public function reconcile(bool $force = FALSE): void {
+    if (!$this->syncEnabled()) {
+      // Deliberately quiet: this is the configured "off", not a fault, and it
+      // is checked hourly. The state is reported on the status report by
+      // hook_requirements() and by `drush unifi:status`.
+      return;
+    }
+
     $door_tid = (int) $this->cfg->get('door_term_id');
     if (!$door_tid) {
       $this->log->warning('UniFi sync aborted: door_term_id is not configured.');
@@ -135,6 +142,11 @@ class UnifiSyncManager {
     // 3,000 members genuinely needing to be added this hour. Refusing here
     // keeps a handful-of-failures problem from becoming a
     // hundreds-of-thousands-of-failures problem.
+    // Record what this run saw, so hook_requirements() can report the valve
+    // without making its own API call — a 20s timeout on the status report
+    // page would be a poor trade for a number we already have here.
+    $this->recordRun(count($should), count($have), !$this->tenantViewIsPlausible(count($should), count($have)));
+
     if (!$force && !$this->tenantViewIsPlausible(count($should), count($have))) {
       $this->log->error(
         'UniFi sync aborted: console reported @have users while @n Drupal members expect access '
@@ -189,6 +201,9 @@ class UnifiSyncManager {
    * since this is per-event, not per-member-per-hour).
    */
   public function syncSingleByEmail(string $email, bool $should_have, array $user_data = []): void {
+    if (!$this->syncEnabled()) {
+      return;
+    }
     $fetch = $this->fetchUnifiUsers();
     if (!$fetch->ok) {
       $this->log->error(
@@ -287,6 +302,86 @@ class UnifiSyncManager {
       }
     }
     return $result;
+  }
+
+  /**
+   * Stores the outcome of a reconcile for later reporting.
+   *
+   * State rather than config: this is an observation, not a setting, and it
+   * must not travel between environments in a config export.
+   */
+  private function recordRun(int $expected, int $present, bool $blocked): void {
+    \Drupal::state()->set('unifi_access_sync.last_run', [
+      'time' => \Drupal::time()->getRequestTime(),
+      'expected' => $expected,
+      'present' => $present,
+      'blocked' => $blocked,
+    ]);
+  }
+
+  /**
+   * Whether syncing to UniFi is switched on at all.
+   *
+   * Separate from, and checked before, the amplification valve. The valve
+   * answers "is the console's view trustworthy right now"; this answers "do we
+   * want this module talking to the door appliance at all". Shipped FALSE, in
+   * the same shape as the sibling event_access_unifi module, so the module is
+   * definitively inert until someone decides otherwise rather than relying on
+   * the valve to keep refusing.
+   */
+  public function syncEnabled(): bool {
+    return (bool) $this->cfg->get('sync_enabled');
+  }
+
+  /**
+   * Describes what the sync would do right now, without doing any of it.
+   *
+   * Read-only: one listUsers call, no queue writes. This is what
+   * `drush unifi:status` and hook_requirements() render, so that "what is the
+   * UniFi sync doing?" has a single answer anyone — or any AI session — can
+   * get in one command instead of reading watchdog.
+   *
+   * @return array
+   *   Keys: enabled, expected, present, floor, valve_would_block, reachable,
+   *   error, missing, extra.
+   */
+  public function status(): array {
+    $out = [
+      'enabled' => $this->syncEnabled(),
+      'expected' => 0,
+      'present' => 0,
+      'floor' => 0,
+      'valve_would_block' => FALSE,
+      'reachable' => FALSE,
+      'error' => NULL,
+      'missing' => 0,
+      'extra' => 0,
+    ];
+
+    $door_tid = (int) $this->cfg->get('door_term_id');
+    if (!$door_tid) {
+      $out['error'] = 'door_term_id is not configured.';
+      return $out;
+    }
+
+    $should = $this->getShouldHaveAccessUserData();
+    $out['expected'] = count($should);
+    $out['floor'] = (int) ceil($out['expected'] * self::MIN_PRESENT_RATIO);
+
+    $fetch = $this->fetchUnifiUsers();
+    if (!$fetch->ok) {
+      $out['error'] = $fetch->describe();
+      return $out;
+    }
+
+    $have = $fetch->data ?? [];
+    $out['reachable'] = TRUE;
+    $out['present'] = count($have);
+    $out['missing'] = count(array_diff_key($should, $have));
+    $out['extra'] = count(array_diff_key($have, $should));
+    $out['valve_would_block'] = !$this->tenantViewIsPlausible($out['expected'], $out['present']);
+
+    return $out;
   }
 
   /**

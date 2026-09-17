@@ -1,3 +1,4 @@
+sync_enabled: false
 api_host: ''
 api_path_prefix: /api/v1/developer
 api_token: ''

@@ -165,6 +165,14 @@ class UnifiSettingsForm extends ConfigFormBase {
       '#required' => TRUE,
     ];
 
+    $form['sync_enabled'] = [
+      '#type' => 'checkbox',
+      '#title' => $this->t('Sync door-badged members to UniFi Access'),
+      '#description' => $this->t('The master switch. Off: this module makes no changes at the console at all, and cron does nothing. Run <code>drush unifi:status</code> to see what turning it on would do before turning it on — on a console that is nearly empty it means one create per missing member.'),
+      '#default_value' => (bool) $cfg->get('sync_enabled'),
+      '#weight' => -10,
+    ];
+
     $form['allow_delete'] = [
       '#type' => 'checkbox',
       '#title' => $this->t('Allow the sync to delete UniFi users that are not door-badged in Drupal'),
@@ -222,6 +230,7 @@ class UnifiSettingsForm extends ConfigFormBase {
       ->set('verify_ssl', (bool) $form_state->getValue('verify_ssl'))
       ->set('door_term_id', $door_term_id)
       ->set('allow_delete', (bool) $form_state->getValue('allow_delete'))
+      ->set('sync_enabled', (bool) $form_state->getValue('sync_enabled'))
       ->save();
 
     parent::submitForm($form, $form_state);

@@ -80,6 +80,12 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->installSchema('system', ['sequences']);
     $this->installConfig(['system', 'user', 'node', 'unifi_access_sync']);
 
+    // sync_enabled ships FALSE, so without this every test below would pass
+    // for the wrong reason — reconcile() would early-return and queue nothing,
+    // which is exactly what most of these assert. Tests that care about the
+    // switch itself set it back to FALSE explicitly.
+    $this->config('unifi_access_sync.settings')->set('sync_enabled', TRUE)->save();
+
     NodeType::create([
       'type' => 'badge_request',
       'name' => 'Badge Request',
@@ -706,6 +712,136 @@ class UnifiSyncManagerTest extends KernelTestBase {
 
     $this->assertCount(1, $this->queuedItems);
     $this->assertSame('Mixed.Case@Example.com', $this->queuedItems[0]['email']);
+  }
+
+
+  /**
+   * The master switch stops reconcile before it touches the API at all.
+   *
+   * Distinct from the amplification valve: the valve asks whether the console
+   * view can be trusted right now, this asks whether we want the module
+   * talking to the door appliance at all. It ships off.
+   */
+  public function testReconcileDoesNothingWhileSwitchedOff(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->set('sync_enabled', FALSE)
+      ->save();
+
+    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user->save();
+    Node::create([
+      'type' => 'badge_request',
+      'title' => 'Request for Test User',
+      'field_badge_requested' => $door_term->id(),
+      'field_badge_status' => 'active',
+      'field_member_to_badge' => $user->id(),
+    ])->save();
+
+    UnifiSyncManager::resetCache();
+
+    // Not merely "queues nothing" — it must not even ask the console.
+    $this->apiMock->expects($this->never())->method('listUsers');
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(0, $this->queuedItems);
+  }
+
+  /**
+   * --force must not override the master switch.
+   *
+   * --force bypasses the valve only. If someone has switched the sync off,
+   * a Drush flag is not consent to start writing at the door.
+   */
+  public function testForceDoesNotOverrideTheMasterSwitch(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->set('sync_enabled', FALSE)
+      ->save();
+
+    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user->save();
+    Node::create([
+      'type' => 'badge_request',
+      'title' => 'Request for Test User',
+      'field_badge_requested' => $door_term->id(),
+      'field_badge_status' => 'active',
+      'field_member_to_badge' => $user->id(),
+    ])->save();
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->expects($this->never())->method('listUsers');
+
+    $this->getSyncManager()->reconcile(TRUE);
+
+    $this->assertCount(0, $this->queuedItems);
+  }
+
+  /**
+   * The per-badge path is gated by the switch too.
+   *
+   * Missing this would leave a second way in: saving a badge_request would
+   * still write to the console while the module is supposedly off.
+   */
+  public function testSyncSingleByEmailRespectsTheMasterSwitch(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('sync_enabled', FALSE)
+      ->save();
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->expects($this->never())->method('listUsers');
+
+    $this->getSyncManager()->syncSingleByEmail('someone@example.com', TRUE, []);
+
+    $this->assertCount(0, $this->queuedItems);
+  }
+
+  /**
+   * status() answers the whole question read-only, for drush and the UI.
+   */
+  public function testStatusReportsTheValveWithoutActing(): void {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+
+    $this->config('unifi_access_sync.settings')
+      ->set('door_term_id', $door_term->id())
+      ->save();
+
+    for ($i = 1; $i <= 10; $i++) {
+      $user = User::create(['name' => "Member $i", 'mail' => "member$i@example.com"]);
+      $user->save();
+      Node::create([
+        'type' => 'badge_request',
+        'title' => "Request for Member $i",
+        'field_badge_requested' => $door_term->id(),
+        'field_badge_status' => 'active',
+        'field_member_to_badge' => $user->id(),
+      ])->save();
+    }
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u1', 'user_email' => 'member1@example.com'],
+      ]));
+
+    $status = $this->getSyncManager()->status();
+
+    $this->assertTrue($status['enabled']);
+    $this->assertTrue($status['reachable']);
+    $this->assertSame(10, $status['expected']);
+    $this->assertSame(1, $status['present']);
+    $this->assertSame(5, $status['floor']);
+    $this->assertSame(9, $status['missing']);
+    $this->assertTrue($status['valve_would_block']);
+    $this->assertCount(0, $this->queuedItems, 'status() must not enqueue anything.');
   }
 
 }

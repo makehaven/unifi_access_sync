@@ -19,6 +19,45 @@ function unifi_access_sync_requirements($phase) {
     return $requirements;
   }
 
+  /** @var \Drupal\unifi_access_sync\Service\UnifiSyncManager $mgr */
+  $mgr = \Drupal::service('unifi_access_sync.sync_manager');
+
+  if (!$mgr->syncEnabled()) {
+    $requirements['unifi_access_sync_off'] = [
+      'title' => t('UniFi Access sync'),
+      'value' => t('Switched off'),
+      'description' => t('Members are not being synced to the UniFi Access console. Run <code>drush unifi:status</code> to see what turning it on would do, then <code>drush cset unifi_access_sync.settings sync_enabled true</code>.'),
+      'severity' => REQUIREMENT_WARNING,
+    ];
+  }
+  else {
+    // Read the last reconcile's own record rather than calling the API here:
+    // this hook runs on page loads, and a 20s API timeout on the status report
+    // is not a trade worth making for a number reconcile already computed.
+    $last = \Drupal::state()->get('unifi_access_sync.last_run');
+    if (!is_array($last)) {
+      $requirements['unifi_access_sync_nodata'] = [
+        'title' => t('UniFi Access sync'),
+        'value' => t('On, but has not completed a run yet'),
+        'description' => t('No reconcile has recorded a result. Run <code>drush unifi:status</code> to check it can reach the console.'),
+        'severity' => REQUIREMENT_WARNING,
+      ];
+    }
+    elseif (!empty($last['blocked'])) {
+      $requirements['unifi_access_sync_valve'] = [
+        'title' => t('UniFi Access sync'),
+        'value' => t('Refusing to sync — console held @present of @expected', [
+          '@present' => $last['present'],
+          '@expected' => $last['expected'],
+        ]),
+        'description' => t('The amplification valve is refusing to enqueue because the console holds fewer than half the members Drupal expects, so nothing is being synced. Last checked @ago ago. Seed the console deliberately with <code>drush unifi:sync --force</code>, or fix why the console view is short.', [
+          '@ago' => \Drupal::service('date.formatter')->formatTimeDiffSince($last['time']),
+        ]),
+        'severity' => REQUIREMENT_ERROR,
+      ];
+    }
+  }
+
   $paused_until = (int) \Drupal::state()->get('unifi_access_sync.last_cron', 0);
   $now = \Drupal::time()->getRequestTime();
   if ($paused_until > $now) {
@@ -58,4 +97,28 @@ function unifi_access_sync_update_9001() {
   }
 
   return t('No manual cron pause was in place; nothing to clear.');
+}
+
+/**
+ * Add the sync_enabled master switch, shipped off.
+ *
+ * The config/install default only applies at module install, so an existing
+ * site needs the key seeded here. It is ALSO committed to the site's exported config — an
+ * update hook that seeds a key without the object being exported has the
+ * key stripped again by the next `drush cim`, a trap this project has hit
+ * before.
+ *
+ * Shipped FALSE deliberately. The 2026-09-15 runaway ran against a console
+ * holding 23 of 3,309 members; whether to seed that console is a decision
+ * someone makes, not something a deploy should start doing on its own.
+ */
+function unifi_access_sync_update_9002() {
+  $config = \Drupal::configFactory()->getEditable('unifi_access_sync.settings');
+  if ($config->get('sync_enabled') === NULL) {
+    $config->set('sync_enabled', FALSE)->save();
+    return t('Added sync_enabled, switched off. Run `drush unifi:status` to see what turning it on would do.');
+  }
+  return t('sync_enabled was already set to @v; left alone.', [
+    '@v' => var_export($config->get('sync_enabled'), TRUE),
+  ]);
 }

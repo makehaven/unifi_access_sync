@@ -2,6 +2,9 @@ unifi_access_sync.settings:
   type: config_object
   label: 'UniFi Access Sync settings'
   mapping:
+    sync_enabled:
+      type: boolean
+      label: 'Sync members to UniFi Access'
     api_host:
       type: string
       label: 'UniFi Access API host'

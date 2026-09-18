@@ -38,6 +38,7 @@ class UnifiAccessSyncCommands extends DrushCommands {
     $o = $this->output();
 
     $o->writeln('Sync switched on:   ' . ($s['enabled'] ? 'yes' : 'NO (sync_enabled is false)'));
+    $o->writeln('Environment:        ' . ($s['live_env'] ? 'live (writes permitted)' : 'NOT live — writes REFUSED whatever the switch says'));
 
     if ($s['error'] !== NULL) {
       $o->writeln('Console reachable:  NO');
@@ -54,7 +55,7 @@ class UnifiAccessSyncCommands extends DrushCommands {
 
     if (!$s['enabled']) {
       $o->writeln('Nothing will happen: the sync is switched off.');
-      $o->writeln('To turn it on:      drush cset unifi_access_sync.settings sync_enabled true');
+      $o->writeln('To turn it on:      drush cset unifi_access_sync.settings sync_enabled 1  (NOT `false`/`true` as words — `cset` writes them as STRINGS and "false" is truthy)');
     }
     if ($s['valve_would_block']) {
       $o->writeln('The valve WOULD BLOCK: the console holds too few users to trust.');
@@ -84,9 +85,17 @@ class UnifiAccessSyncCommands extends DrushCommands {
    *   Seed a console that is legitimately empty or sparse.
    */
   public function sync(array $options = ['force' => FALSE]) : void {
+    if (!$this->mgr->isLiveEnvironment()) {
+      $this->output()->writeln('REFUSED: this is not the live environment.');
+      $this->output()->writeln('Every environment runs on a clone of live\'s database, so it holds live\'s');
+      $this->output()->writeln('UniFi credentials and can reach the REAL door appliance. On 2026-09-18');
+      $this->output()->writeln('Pantheon dev created ~1,224 real users this way and emailed every member.');
+      return;
+    }
     if (!$this->mgr->syncEnabled()) {
       $this->output()->writeln('UniFi sync is switched off (sync_enabled is false); nothing to do.');
-      $this->output()->writeln('Turn it on with: drush cset unifi_access_sync.settings sync_enabled true');
+      $this->output()->writeln('Turn it on with: drush unifi:enable  (never `cset ... false`, which writes');
+      $this->output()->writeln('the STRING "false" and is truthy).');
       return;
     }
     $force = (bool) $options['force'];

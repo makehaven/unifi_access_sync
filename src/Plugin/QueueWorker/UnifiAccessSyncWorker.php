@@ -6,6 +6,7 @@ use Drupal\Core\Queue\QueueWorkerBase;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Drupal\unifi_access_sync\Service\UnifiApiService;
+use Drupal\unifi_access_sync\Service\UnifiSyncManager;
 use Drupal\Core\Logger\LoggerChannelInterface;
 
 /**
@@ -21,11 +22,13 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
 
   protected UnifiApiService $api;
   protected LoggerChannelInterface $logger;
+  protected UnifiSyncManager $manager;
 
-  public function __construct(array $configuration, $plugin_id, $plugin_definition, UnifiApiService $unifi_api, LoggerChannelInterface $logger) {
+  public function __construct(array $configuration, $plugin_id, $plugin_definition, UnifiApiService $unifi_api, LoggerChannelInterface $logger, UnifiSyncManager $manager) {
     parent::__construct($configuration, $plugin_id, $plugin_definition);
     $this->api = $unifi_api;
     $this->logger = $logger;
+    $this->manager = $manager;
   }
 
   public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
@@ -34,7 +37,8 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
       $plugin_id,
       $plugin_definition,
       $container->get('unifi_access_sync.api'),
-      $container->get('logger.channel.unifi_access_sync')
+      $container->get('logger.channel.unifi_access_sync'),
+      $container->get('unifi_access_sync.sync_manager')
     );
   }
 
@@ -49,6 +53,25 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
    * so Drupal's queue backend can handle them appropriately.
    */
   public function processItem($data) {
+    // The master switch has to be re-checked HERE, not only where items are
+    // enqueued. Gating the queue-in and not the queue-out is not a master
+    // switch: anything already queued still fires, and queued work outlives
+    // the decision to stop. On 2026-09-18 that is exactly what happened —
+    // Pantheon dev drained a backlog and created ~1,224 real users on the
+    // PRODUCTION console, emailing an invitation to each one, while
+    // `sync_enabled` was off everywhere a human had thought to look.
+    if (!$this->manager->writesAllowed()) {
+      $this->logger->warning('UniFi sync is switched off or this is not the live environment; discarding a queued @a for @e.', [
+        '@a' => $data['action'] ?? 'task',
+        '@e' => $data['email'] ?? '(no email)',
+      ]);
+      // Discarded rather than re-thrown: an exception would leave the item in
+      // place to fire the moment the switch flips, which is the surprise this
+      // guard exists to prevent. reconcile() re-enqueues whatever is still
+      // genuinely needed once the sync is deliberately turned on.
+      return;
+    }
+
     if (!isset($data['action']) || !isset($data['email'])) {
       $this->logger->error('Invalid UniFi sync task data: Missing action or email. Data: @data', ['@data' => json_encode($data)]);
       return;

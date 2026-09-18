@@ -111,7 +111,7 @@ class UnifiSyncManager {
    *   TRUE to bypass the ratio valve. Never set from cron.
    */
   public function reconcile(bool $force = FALSE): void {
-    if (!$this->syncEnabled()) {
+    if (!$this->writesAllowed()) {
       // Deliberately quiet: this is the configured "off", not a fault, and it
       // is checked hourly. The state is reported on the status report by
       // hook_requirements() and by `drush unifi:status`.
@@ -201,7 +201,7 @@ class UnifiSyncManager {
    * since this is per-event, not per-member-per-hour).
    */
   public function syncSingleByEmail(string $email, bool $should_have, array $user_data = []): void {
-    if (!$this->syncEnabled()) {
+    if (!$this->writesAllowed()) {
       return;
     }
     $fetch = $this->fetchUnifiUsers();
@@ -334,6 +334,40 @@ class UnifiSyncManager {
   }
 
   /**
+   * Whether this environment may write to the door appliance at all.
+   *
+   * `syncEnabled()` answers "has someone switched the sync on". This answers
+   * the question nobody had asked: "is this environment even allowed to talk
+   * to the PRODUCTION console?" Every non-live environment — Pantheon dev and
+   * test, the preview sandbox, and any local site after `lando pull-db` —
+   * runs on a clone of live's database, so it holds live's UniFi credentials
+   * and can reach the real appliance. Pantheon runs cron on all of them.
+   *
+   * On 2026-09-18 Pantheon **dev** created ~1,224 real users on the production
+   * console, emailing an invitation to each member, because its stale database
+   * had never run the update hook that seeds `sync_enabled`. Reads are
+   * harmless and stay allowed; writes are now refused unless this is live.
+   *
+   * Deliberately environment-derived rather than configurable: a config flag
+   * would itself be cloned to every environment, which is the failure mode.
+   */
+  public function isLiveEnvironment(): bool {
+    $env = $_ENV['PANTHEON_ENVIRONMENT'] ?? getenv('PANTHEON_ENVIRONMENT') ?: NULL;
+    // Off-Pantheon (Lando, CI, a container) is never the live appliance's owner.
+    if (!is_string($env) || $env === '') {
+      return FALSE;
+    }
+    return $env === 'live';
+  }
+
+  /**
+   * The single gate every write path must pass: switched on AND on live.
+   */
+  public function writesAllowed(): bool {
+    return $this->syncEnabled() && $this->isLiveEnvironment();
+  }
+
+  /**
    * Describes what the sync would do right now, without doing any of it.
    *
    * Read-only: one listUsers call, no queue writes. This is what
@@ -348,6 +382,8 @@ class UnifiSyncManager {
   public function status(): array {
     $out = [
       'enabled' => $this->syncEnabled(),
+      'live_env' => $this->isLiveEnvironment(),
+      'writes_allowed' => $this->writesAllowed(),
       'expected' => 0,
       'present' => 0,
       'floor' => 0,

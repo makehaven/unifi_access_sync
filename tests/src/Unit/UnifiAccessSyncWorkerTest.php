@@ -21,7 +21,7 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
   /**
    * Builds a worker whose environment gate is open.
    *
-   * processItem() re-checks UnifiSyncManager::writesAllowed() before every
+   * ProcessItem() re-checks UnifiSyncManager::writesAllowed() before every
    * action (the master switch and the live-only rule), so a worker without a
    * manager cannot run at all. These tests are about the actions, so the
    * gate is held open here; the gate itself is covered in
@@ -51,6 +51,9 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     ]);
   }
 
+  /**
+   * A 'create' item builds the payload and reports success.
+   */
   public function testProcessItemCreate(): void {
     $api = $this->createMock(UnifiApiService::class);
     $logger = $this->createMock(LoggerChannelInterface::class);
@@ -116,6 +119,9 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     ]);
   }
 
+  /**
+   * The legacy 'delete' action name still drains as a deactivation.
+   */
   public function testProcessItemDelete(): void {
     $api = $this->createMock(UnifiApiService::class);
     $logger = $this->createMock(LoggerChannelInterface::class);
@@ -137,6 +143,9 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     ]);
   }
 
+  /**
+   * An item without action or email is logged and dropped.
+   */
   public function testProcessItemInvalidData(): void {
     $api = $this->createMock(UnifiApiService::class);
     $logger = $this->createMock(LoggerChannelInterface::class);
@@ -152,6 +161,9 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     $worker->processItem(['action' => 'create']);
   }
 
+  /**
+   * An unknown action is logged and dropped, never sent to the API.
+   */
   public function testProcessItemUnknownAction(): void {
     $api = $this->createMock(UnifiApiService::class);
     $logger = $this->createMock(LoggerChannelInterface::class);
@@ -167,11 +179,10 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     ]);
   }
 
-
   /**
    * The new 'deactivate' action name drains as well as the legacy 'delete'.
    *
-   * reconcile() now queues 'deactivate'; 'delete' stays accepted so anything
+   * Reconcile() now queues 'deactivate'; 'delete' stays accepted so anything
    * an older release left in the queue still drains.
    */
   public function testProcessItemDeactivateActionName(): void {
@@ -195,9 +206,8 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     ]);
   }
 
-
   /**
-   * 'reactivate' restores a member the console holds as DEACTIVATED.
+   * A 'reactivate' item restores a member the console holds as DEACTIVATED.
    */
   public function testProcessItemReactivate(): void {
     $api = $this->createMock(UnifiApiService::class);

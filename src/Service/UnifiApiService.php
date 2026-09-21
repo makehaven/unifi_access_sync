@@ -359,10 +359,10 @@ class UnifiApiService {
    * The mirror of deactivateUser(): `PUT /users/{id}` with
    * `{"status":"ACTIVE"}`. Needed because on 2026-09-18 Pantheon dev
    * mass-created ~1,224 real records on the production console, which the
-   * clean-up then deactivated — 372 of them current members. Re-creating those would fail with
-   * CODE_ADMIN_EMAIL_EXIST; the record is there, it just has to be switched
-   * back on. Verified against the live console on 2026-09-21 (see the
-   * release record).
+   * clean-up then deactivated — 372 of them current members. Re-creating
+   * those would fail with CODE_ADMIN_EMAIL_EXIST; the record is there, it
+   * just has to be switched back on. Verified against the live console on
+   * 2026-09-21 (see the release record).
    */
   public function reactivateUser(string $id): UnifiApiResult {
     return $this->setUserStatus($id, self::STATUS_ACTIVE, 'reactivateUser');
@@ -378,7 +378,11 @@ class UnifiApiService {
    * @param string $op
    *   Operation name for log lines and the envelope check.
    */
-  private function setUserStatus(string $id, string $status, string $op): UnifiApiResult {
+  private function setUserStatus(
+    string $id,
+    string $status,
+    string $op,
+  ): UnifiApiResult {
     if (!$this->isConfigured()) {
       $this->log->warning('UniFi API not configured: missing api_host or token.');
       return UnifiApiResult::failure('UniFi API not configured (missing host or token).');

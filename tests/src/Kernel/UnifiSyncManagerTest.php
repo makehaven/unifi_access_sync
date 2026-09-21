@@ -87,6 +87,14 @@ class UnifiSyncManagerTest extends KernelTestBase {
     // switch itself set it back to FALSE explicitly.
     $this->config('unifi_access_sync.settings')->set('sync_enabled', TRUE)->save();
 
+    // Since 4300988 every write path also requires PANTHEON_ENVIRONMENT=live
+    // (UnifiSyncManager::isLiveEnvironment()), so off-Pantheon — including
+    // this test runner — reconcile() and syncSingleByEmail() return before
+    // touching the queue. The API is mocked here, so pretending to be live is
+    // safe; each test runs in its own process, so nothing leaks.
+    putenv('PANTHEON_ENVIRONMENT=live');
+    $_ENV['PANTHEON_ENVIRONMENT'] = 'live';
+
     // member_role ships as `member`: door access needs the badge AND a current
     // membership. The fixtures below create bare users to test everything
     // else, so the role check is switched off here and switched back on by
@@ -171,6 +179,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->save();
 
     $user = User::create([
+      'status' => 1,
       'name' => 'Test User',
       'mail' => 'test@example.com',
     ]);
@@ -218,7 +227,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('door_term_id', $door_term->id())
       ->save();
 
-    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user = User::create(['status' => 1, 'name' => 'Test User', 'mail' => 'test@example.com']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -253,7 +262,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('door_term_id', $door_term->id())
       ->save();
 
-    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user = User::create(['status' => 1, 'name' => 'Test User', 'mail' => 'test@example.com']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -288,7 +297,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('door_term_id', $door_term->id())
       ->save();
 
-    $user = User::create(['name' => 'No Email User']);
+    $user = User::create(['status' => 1, 'name' => 'No Email User']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -366,6 +375,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->save();
 
     $user = User::create([
+      'status' => 1,
       'name' => 'Display Name',
       'mail' => 'display@example.com',
     ]);
@@ -466,7 +476,6 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertCount(0, $this->queuedItems);
   }
 
-
   /**
    * The 2026-09-15 incident, reproduced: 23 present against a large roster.
    *
@@ -488,7 +497,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
     for ($i = 1; $i <= 40; $i++) {
       $email = "member$i@example.com";
       $expected_emails[] = $email;
-      $user = User::create(['name' => "Member $i", 'mail' => $email]);
+      $user = User::create(['status' => 1, 'name' => "Member $i", 'mail' => $email]);
       $user->save();
       Node::create([
         'type' => 'badge_request',
@@ -534,7 +543,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->save();
 
     for ($i = 1; $i <= 10; $i++) {
-      $user = User::create(['name' => "Member $i", 'mail' => "member$i@example.com"]);
+      $user = User::create(['status' => 1, 'name' => "Member $i", 'mail' => "member$i@example.com"]);
       $user->save();
       Node::create([
         'type' => 'badge_request',
@@ -573,7 +582,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->save();
 
     for ($i = 1; $i <= 10; $i++) {
-      $user = User::create(['name' => "Member $i", 'mail' => "member$i@example.com"]);
+      $user = User::create(['status' => 1, 'name' => "Member $i", 'mail' => "member$i@example.com"]);
       $user->save();
       Node::create([
         'type' => 'badge_request',
@@ -599,7 +608,6 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertCount(5, $this->queuedItems, 'At the floor, the missing half should still be queued.');
   }
 
-
   /**
    * A user this module created is recognised on the next pass.
    *
@@ -616,7 +624,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('door_term_id', $door_term->id())
       ->save();
 
-    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user = User::create(['status' => 1, 'name' => 'Test User', 'mail' => 'test@example.com']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -663,7 +671,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('door_term_id', $door_term->id())
       ->save();
 
-    $user = User::create(['name' => 'Mixed Case', 'mail' => 'Mixed.Case@Example.com']);
+    $user = User::create(['status' => 1, 'name' => 'Mixed Case', 'mail' => 'Mixed.Case@Example.com']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -698,7 +706,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('door_term_id', $door_term->id())
       ->save();
 
-    $user = User::create(['name' => 'Mixed Case', 'mail' => 'Mixed.Case@Example.com']);
+    $user = User::create(['status' => 1, 'name' => 'Mixed Case', 'mail' => 'Mixed.Case@Example.com']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -722,7 +730,6 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertSame('Mixed.Case@Example.com', $this->queuedItems[0]['email']);
   }
 
-
   /**
    * The master switch stops reconcile before it touches the API at all.
    *
@@ -739,7 +746,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('sync_enabled', FALSE)
       ->save();
 
-    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user = User::create(['status' => 1, 'name' => 'Test User', 'mail' => 'test@example.com']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -774,7 +781,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->set('sync_enabled', FALSE)
       ->save();
 
-    $user = User::create(['name' => 'Test User', 'mail' => 'test@example.com']);
+    $user = User::create(['status' => 1, 'name' => 'Test User', 'mail' => 'test@example.com']);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -812,7 +819,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
-   * status() answers the whole question read-only, for drush and the UI.
+   * Status() answers the whole question read-only, for drush and the UI.
    */
   public function testStatusReportsTheValveWithoutActing(): void {
     $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
@@ -823,7 +830,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->save();
 
     for ($i = 1; $i <= 10; $i++) {
-      $user = User::create(['name' => "Member $i", 'mail' => "member$i@example.com"]);
+      $user = User::create(['status' => 1, 'name' => "Member $i", 'mail' => "member$i@example.com"]);
       $user->save();
       Node::create([
         'type' => 'badge_request',
@@ -852,7 +859,6 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertCount(0, $this->queuedItems, 'status() must not enqueue anything.');
   }
 
-
   /**
    * Creates a door term, points config at it, and returns it.
    */
@@ -867,7 +873,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
    * Creates a user with an active door badge.
    */
   protected function badgedUser(Term $door_term, string $email, array $values = []): User {
-    $user = User::create(['name' => $email, 'mail' => $email] + $values);
+    $user = User::create($values + ['status' => 1, 'name' => $email, 'mail' => $email]);
     $user->save();
     Node::create([
       'type' => 'badge_request',
@@ -914,8 +920,8 @@ class UnifiSyncManagerTest extends KernelTestBase {
    * A member the console holds as DEACTIVATED is restored, not re-created.
    *
    * On 2026-09-18 Pantheon dev mass-created ~1,224 real records that the
-   * clean-up then deactivated; 372 were current members. A create would be refused
-   * (CODE_ADMIN_EMAIL_EXIST) and they would stay locked out.
+   * clean-up then deactivated; 372 were current members. A create would be
+   * refused (CODE_ADMIN_EMAIL_EXIST) and they would stay locked out.
    */
   public function testReconcileQueuesReactivateForDeactivatedMember(): void {
     $door_term = $this->doorTerm();
@@ -965,7 +971,8 @@ class UnifiSyncManagerTest extends KernelTestBase {
 
     $this->getSyncManager()->reconcile(TRUE);
     $this->assertCount(8, $this->queuedItems, '--force restores the eight switched-off members.');
-    $this->assertSame(['reactivate'], array_unique(array_column($this->queuedItems, 'action')));
+    $actions = array_unique(array_column($this->queuedItems, 'action'));
+    $this->assertSame(['reactivate'], $actions);
   }
 
   /**
@@ -995,7 +1002,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
   }
 
   /**
-   * status() reports the active/deactivated split the seed decision needs.
+   * Status() reports the active/deactivated split the seed decision needs.
    */
   public function testStatusSplitsActiveAndDeactivated(): void {
     $door_term = $this->doorTerm();

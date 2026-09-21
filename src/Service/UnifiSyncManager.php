@@ -320,7 +320,10 @@ class UnifiSyncManager {
       return [];
     }
 
-    $role = trim((string) ($this->cfg->get('member_role') ?: 'member'));
+    // NULL (key never seeded) means the default; an explicit empty string
+    // means "no role check" — the two must not collapse into each other.
+    $role = $this->cfg->get('member_role');
+    $role = $role === NULL ? 'member' : trim((string) $role);
     $users = $this->etm->getStorage('user')->loadMultiple(array_keys($uids));
     $result = [];
     foreach ($users as $u) {
@@ -461,7 +464,8 @@ class UnifiSyncManager {
     $out['present'] = count($active);
     $out['present_deactivated'] = count($have) - count($active);
     $out['missing'] = count(array_diff_key($should, $have));
-    $out['reactivate'] = count(array_filter(array_intersect_key($have, $should), fn(array $u) => !$this->isActiveRecord($u)));
+    $present_expected = array_intersect_key($have, $should);
+    $out['reactivate'] = count(array_filter($present_expected, fn(array $u) => !$this->isActiveRecord($u)));
     $out['extra'] = count(array_diff_key($active, $should));
     $out['valve_would_block'] = !$this->tenantViewIsPlausible($out['expected'], $out['present']);
 

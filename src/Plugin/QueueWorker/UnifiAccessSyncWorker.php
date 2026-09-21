@@ -20,8 +20,19 @@ use Drupal\Core\Logger\LoggerChannelInterface;
  */
 class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryPluginInterface {
 
+  /**
+   * The UniFi Access API client.
+   */
   protected UnifiApiService $api;
+
+  /**
+   * The module's logger channel.
+   */
   protected LoggerChannelInterface $logger;
+
+  /**
+   * The sync manager, consulted for the write gate before every item.
+   */
   protected UnifiSyncManager $manager;
 
   public function __construct(array $configuration, $plugin_id, $plugin_definition, UnifiApiService $unifi_api, LoggerChannelInterface $logger, UnifiSyncManager $manager) {
@@ -31,6 +42,9 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
     $this->manager = $manager;
   }
 
+  /**
+   * {@inheritdoc}
+   */
   public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
     return new static(
       $configuration,

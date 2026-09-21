@@ -135,6 +135,12 @@ class UnifiSyncManager {
       return;
     }
     $have = $fetch->data ?? [];
+    // Only ACTIVE records count as "the console holds this member". After the
+    // 2026-09-18 dev mass-create and clean-up the console held 1,227
+    // DEACTIVATED records; counting
+    // those would let the valve trust a roster in which almost nobody can
+    // actually open the door.
+    $active = $this->activeOnly($have);
 
     // Amplification safety valve. An implausibly small tenant view is almost
     // always a setup, connectivity or API problem (wrong door_term_id, wrong
@@ -145,18 +151,18 @@ class UnifiSyncManager {
     // Record what this run saw, so hook_requirements() can report the valve
     // without making its own API call — a 20s timeout on the status report
     // page would be a poor trade for a number we already have here.
-    $this->recordRun(count($should), count($have), !$this->tenantViewIsPlausible(count($should), count($have)));
+    $this->recordRun(count($should), count($active), !$this->tenantViewIsPlausible(count($should), count($active)));
 
-    if (!$force && !$this->tenantViewIsPlausible(count($should), count($have))) {
+    if (!$force && !$this->tenantViewIsPlausible(count($should), count($active))) {
       $this->log->error(
-        'UniFi sync aborted: console reported @have users while @n Drupal members expect access '
+        'UniFi sync aborted: console reported @have active users while @n Drupal members expect access '
         . '(below the @pct percent floor). Nothing was enqueued and nothing will be until this is resolved. '
         . 'Check that api_host points at the intended console, that listUsers is not returning an '
         . 'error envelope inside an HTTP 200, and that recent createUser calls actually succeeded. '
         . 'If the console really is meant to be this empty (fresh install, rebuilt console), run '
         . 'drush unifi:sync --force once to seed it.',
         [
-          '@have' => count($have),
+          '@have' => count($active),
           '@n' => count($should),
           '@pct' => (int) round(self::MIN_PRESENT_RATIO * 100),
         ]
@@ -167,8 +173,8 @@ class UnifiSyncManager {
     $queue = $this->queueFactory->get('unifi_access_sync_queue');
 
     foreach ($should as $key => $data) {
+      $email = $data['email'] ?? $key;
       if (!isset($have[$key])) {
-        $email = $data['email'] ?? $key;
         $this->log->notice('Queueing UniFi user creation for @e', ['@e' => $email]);
         $queue->createItem([
           'action' => 'create',
@@ -176,9 +182,21 @@ class UnifiSyncManager {
           'user_data' => $data,
         ]);
       }
+      elseif (!$this->isActiveRecord($have[$key]) && !empty($have[$key]['id'])) {
+        // Present but switched off. A create would be refused
+        // (CODE_ADMIN_EMAIL_EXIST) and the member would stay locked out.
+        $this->log->notice('Queueing UniFi reactivation for @e', ['@e' => $email]);
+        $queue->createItem([
+          'action' => 'reactivate',
+          'email' => $email,
+          'user_id' => $have[$key]['id'],
+        ]);
+      }
     }
     foreach ($have as $email => $user) {
-      if (!isset($should[$email]) && !empty($user['id'])) {
+      // A record that is already DEACTIVATED holds no access; there is
+      // nothing to revoke and nothing worth a log line every hour.
+      if (!isset($should[$email]) && !empty($user['id']) && $this->isActiveRecord($user)) {
         if (!$this->deletesAllowed()) {
           $this->log->notice('Would revoke UniFi access for @e (not door-badged in Drupal) — revocation is disabled (allow_delete).', ['@e' => $email]);
           continue;
@@ -227,7 +245,15 @@ class UnifiSyncManager {
         'user_data' => $user_data,
       ]);
     }
-    elseif (!$should_have && $exists && !empty($have[$key]['id'])) {
+    elseif ($should_have && $exists && !$this->isActiveRecord($have[$key]) && !empty($have[$key]['id'])) {
+      $this->log->notice('Queueing single UniFi reactivation for @e', ['@e' => $email]);
+      $queue->createItem([
+        'action' => 'reactivate',
+        'email' => $email,
+        'user_id' => $have[$key]['id'],
+      ]);
+    }
+    elseif (!$should_have && $exists && !empty($have[$key]['id']) && $this->isActiveRecord($have[$key])) {
       if (!$this->deletesAllowed()) {
         $this->log->notice('Would revoke UniFi access for @e — revocation is disabled (allow_delete).', ['@e' => $email]);
         return;
@@ -254,6 +280,15 @@ class UnifiSyncManager {
 
   /**
    * Builds list of user data that should have access from badge_request nodes.
+   *
+   * Two conditions, and both are needed. The door badge records that a person
+   * has been through orientation — it is a qualification and is never revoked
+   * (JR, 2026-09-21), so on its own it names 3,314 people, of whom ~2,470 are
+   * former members. Whether they are a member *now* is the role. So: door
+   * badge active AND the member role AND the account not blocked. On
+   * 2026-09-21 that was 848 people, not 3,314.
+   *
+   * The role name is `member_role` in settings and defaults to `member`.
    */
   public function getShouldHaveAccessUserData(): array {
     $door_tid = (int) $this->cfg->get('door_term_id');
@@ -285,9 +320,15 @@ class UnifiSyncManager {
       return [];
     }
 
+    $role = trim((string) ($this->cfg->get('member_role') ?: 'member'));
     $users = $this->etm->getStorage('user')->loadMultiple(array_keys($uids));
     $result = [];
     foreach ($users as $u) {
+      // A blocked account or a lapsed membership keeps its badge (the
+      // qualification) but not its door access.
+      if (!$u->isActive() || ($role !== '' && !$u->hasRole($role))) {
+        continue;
+      }
       $email = (string) $u->getEmail();
       if ($email) {
         // Keyed lowercase so it compares against the UniFi side, which is
@@ -376,8 +417,10 @@ class UnifiSyncManager {
    * get in one command instead of reading watchdog.
    *
    * @return array
-   *   Keys: enabled, expected, present, floor, valve_would_block, reachable,
-   *   error, missing, extra.
+   *   Keys: enabled, live_env, writes_allowed, expected, present (ACTIVE
+   *   console users), present_deactivated, floor, valve_would_block,
+   *   reachable, error, missing (create needed), reactivate (present but
+   *   DEACTIVATED), extra (ACTIVE in the console, not vouched for by Drupal).
    */
   public function status(): array {
     $out = [
@@ -386,11 +429,13 @@ class UnifiSyncManager {
       'writes_allowed' => $this->writesAllowed(),
       'expected' => 0,
       'present' => 0,
+      'present_deactivated' => 0,
       'floor' => 0,
       'valve_would_block' => FALSE,
       'reachable' => FALSE,
       'error' => NULL,
       'missing' => 0,
+      'reactivate' => 0,
       'extra' => 0,
     ];
 
@@ -412,12 +457,38 @@ class UnifiSyncManager {
 
     $have = $fetch->data ?? [];
     $out['reachable'] = TRUE;
-    $out['present'] = count($have);
+    $active = $this->activeOnly($have);
+    $out['present'] = count($active);
+    $out['present_deactivated'] = count($have) - count($active);
     $out['missing'] = count(array_diff_key($should, $have));
-    $out['extra'] = count(array_diff_key($have, $should));
+    $out['reactivate'] = count(array_filter(array_intersect_key($have, $should), fn(array $u) => !$this->isActiveRecord($u)));
+    $out['extra'] = count(array_diff_key($active, $should));
     $out['valve_would_block'] = !$this->tenantViewIsPlausible($out['expected'], $out['present']);
 
     return $out;
+  }
+
+  /**
+   * Whether a console record has door access right now.
+   *
+   * Only an explicit DEACTIVATED counts as switched off. A record with no
+   * `status` at all (an older fixture, or a console that stops sending the
+   * field) is treated as active on purpose: the other reading would make
+   * every member look like they need restoring and queue a PUT per member
+   * per hour at the door — the same shape as the 2026-09-15 runaway. The
+   * cost of this reading is that a genuinely deactivated member whose status
+   * we cannot see stays deactivated, which is the status quo, not a new
+   * write.
+   */
+  private function isActiveRecord(array $record): bool {
+    return strtoupper((string) ($record['status'] ?? '')) !== UnifiApiService::STATUS_DEACTIVATED;
+  }
+
+  /**
+   * The subset of an indexed console map whose records can open the door.
+   */
+  private function activeOnly(array $have): array {
+    return array_filter($have, fn(array $u) => $this->isActiveRecord($u));
   }
 
   /**
@@ -480,9 +551,14 @@ class UnifiSyncManager {
         $u['email'] ?? NULL,
         $u['profile']['email'] ?? NULL,
       ];
+      // Status travels with the record: a DEACTIVATED user is *present* in
+      // the console but has no door access, and the two cases need different
+      // actions (reactivate vs create) and different counting (the valve
+      // must not trust a console full of switched-off records).
+      $status = strtoupper((string) ($u['status'] ?? ''));
       foreach ($addresses as $email) {
         if (is_string($email) && $email !== '') {
-          $map[mb_strtolower($email)] = ['id' => $id, 'raw' => $u];
+          $map[mb_strtolower($email)] = ['id' => $id, 'status' => $status, 'raw' => $u];
         }
       }
     }

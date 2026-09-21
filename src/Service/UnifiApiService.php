@@ -26,7 +26,12 @@ class UnifiApiService {
   /**
    * The `status` value that revokes a user's access at the door.
    */
-  private const STATUS_DEACTIVATED = 'DEACTIVATED';
+  public const STATUS_DEACTIVATED = 'DEACTIVATED';
+
+  /**
+   * The `status` value of a user who can use their credentials at the door.
+   */
+  public const STATUS_ACTIVE = 'ACTIVE';
 
   /**
    * The HTTP client.
@@ -345,6 +350,35 @@ class UnifiApiService {
    * the console's audit history for that person.
    */
   public function deactivateUser(string $id): UnifiApiResult {
+    return $this->setUserStatus($id, self::STATUS_DEACTIVATED, 'deactivateUser');
+  }
+
+  /**
+   * Restores door access for a user the console already holds.
+   *
+   * The mirror of deactivateUser(): `PUT /users/{id}` with
+   * `{"status":"ACTIVE"}`. Needed because on 2026-09-18 Pantheon dev
+   * mass-created ~1,224 real records on the production console, which the
+   * clean-up then deactivated — 372 of them current members. Re-creating those would fail with
+   * CODE_ADMIN_EMAIL_EXIST; the record is there, it just has to be switched
+   * back on. Verified against the live console on 2026-09-21 (see the
+   * release record).
+   */
+  public function reactivateUser(string $id): UnifiApiResult {
+    return $this->setUserStatus($id, self::STATUS_ACTIVE, 'reactivateUser');
+  }
+
+  /**
+   * Sets a console user's status — the one write both revoke and restore use.
+   *
+   * @param string $id
+   *   The console user id.
+   * @param string $status
+   *   STATUS_ACTIVE or STATUS_DEACTIVATED.
+   * @param string $op
+   *   Operation name for log lines and the envelope check.
+   */
+  private function setUserStatus(string $id, string $status, string $op): UnifiApiResult {
     if (!$this->isConfigured()) {
       $this->log->warning('UniFi API not configured: missing api_host or token.');
       return UnifiApiResult::failure('UniFi API not configured (missing host or token).');
@@ -354,34 +388,37 @@ class UnifiApiService {
       $res = $this->http->request('PUT', $this->base() . '/users/' . $id, [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
-        'json' => ['status' => self::STATUS_DEACTIVATED],
+        'json' => ['status' => $status],
         'timeout' => 20,
       ]);
 
       $statusCode = $res->getStatusCode();
       if ($statusCode < 200 || $statusCode >= 300) {
         $body = $this->trimForLog((string) $res->getBody());
-        $this->log->error('UniFi deactivateUser returned HTTP @code. Response: @body', [
+        $this->log->error('UniFi @op returned HTTP @code. Response: @body', [
+          '@op' => $op,
           '@code' => $statusCode,
           '@body' => $body,
         ]);
         return UnifiApiResult::failure(
-          errorMessage: 'deactivateUser non-2xx response',
+          errorMessage: $op . ' non-2xx response',
           statusCode: $statusCode,
           responseBody: $body,
         );
       }
-      // Same trap as createUser: a refused delete comes back 200 with an
+      // Same trap as createUser: a refused write comes back 200 with an
       // error envelope. Reporting that as success would leave a revoked
-      // member present in the console with their door access intact, which
-      // is the failure direction that actually matters here.
-      return $this->decodeEnvelope($statusCode, (string) $res->getBody(), 'deactivateUser');
+      // member present in the console with their door access intact — or a
+      // restored member still locked out — and both are the failure
+      // direction that actually matters here.
+      return $this->decodeEnvelope($statusCode, (string) $res->getBody(), $op);
     }
     catch (RequestException $e) {
       $response = $e->getResponse();
       $statusCode = $response?->getStatusCode();
       $body = $response ? $this->trimForLog((string) $response->getBody()) : NULL;
-      $this->log->error('UniFi deactivateUser HTTP error @code: @m. Body: @body', [
+      $this->log->error('UniFi @op HTTP error @code: @m. Body: @body', [
+        '@op' => $op,
         '@code' => $statusCode ?? 'n/a',
         '@m' => $e->getMessage(),
         '@body' => $body ?? '',
@@ -393,7 +430,7 @@ class UnifiApiService {
       );
     }
     catch (\Throwable $e) {
-      $this->log->error('UniFi deactivateUser exception: @m', ['@m' => $e->getMessage()]);
+      $this->log->error('UniFi @op exception: @m', ['@op' => $op, '@m' => $e->getMessage()]);
       return UnifiApiResult::failure(errorMessage: 'Exception: ' . $e->getMessage());
     }
   }

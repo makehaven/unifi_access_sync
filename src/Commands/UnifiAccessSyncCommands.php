@@ -47,10 +47,12 @@ class UnifiAccessSyncCommands extends DrushCommands {
     }
 
     $o->writeln('Console reachable:  yes');
-    $o->writeln(sprintf('Drupal expects:     %d door-badged members', $s['expected']));
-    $o->writeln(sprintf('Console holds:      %d', $s['present']));
-    $o->writeln(sprintf('Valve floor (50%%):  %d', $s['floor']));
-    $o->writeln(sprintf('Missing / extra:    %d / %d', $s['missing'], $s['extra']));
+    $o->writeln(sprintf('Drupal expects:     %d door-badged CURRENT members (badge + member role)', $s['expected']));
+    $o->writeln(sprintf('Console holds:      %d active  (+ %d deactivated, no door access)', $s['present'], $s['present_deactivated']));
+    $o->writeln(sprintf('Valve floor (50%%):  %d active', $s['floor']));
+    $o->writeln(sprintf('To create:          %d  (members with no console record)', $s['missing']));
+    $o->writeln(sprintf('To reactivate:      %d  (members present but switched off)', $s['reactivate']));
+    $o->writeln(sprintf('Extra (active):     %d  (active in the console, not a current door-badged member)', $s['extra']));
     $o->writeln('');
 
     if (!$s['enabled']) {
@@ -59,11 +61,11 @@ class UnifiAccessSyncCommands extends DrushCommands {
     }
     if ($s['valve_would_block']) {
       $o->writeln('The valve WOULD BLOCK: the console holds too few users to trust.');
-      $o->writeln('Seeding it is deliberate and writes once per missing member:');
-      $o->writeln(sprintf('                      drush unifi:sync --force   (~%d creates)', $s['missing']));
+      $o->writeln('Seeding it is deliberate and writes once per member needing it:');
+      $o->writeln(sprintf('                      drush unifi:sync --force   (~%d creates + %d reactivations)', $s['missing'], $s['reactivate']));
     }
     elseif ($s['enabled']) {
-      $o->writeln(sprintf('Next cron run would queue %d create(s).', $s['missing']));
+      $o->writeln(sprintf('Next cron run would queue %d create(s) and %d reactivation(s).', $s['missing'], $s['reactivate']));
     }
   }
 

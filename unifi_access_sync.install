@@ -46,7 +46,7 @@ function unifi_access_sync_requirements($phase) {
     elseif (!empty($last['blocked'])) {
       $requirements['unifi_access_sync_valve'] = [
         'title' => t('UniFi Access sync'),
-        'value' => t('Refusing to sync — console held @present of @expected', [
+        'value' => t('Refusing to sync — console held @present active of @expected current members', [
           '@present' => $last['present'],
           '@expected' => $last['expected'],
         ]),
@@ -121,4 +121,22 @@ function unifi_access_sync_update_9002() {
   return t('sync_enabled was already set to @v; left alone.', [
     '@v' => var_export($config->get('sync_enabled'), TRUE),
   ]);
+}
+
+/**
+ * Add member_role: door access needs the badge AND a current membership.
+ *
+ * The door badge is a qualification and is never revoked, so on its own it
+ * named 3,314 accounts of whom ~2,470 were former members. Seeding the
+ * console from that list would have put every ex-member at the door. The
+ * role is what says "member now". Defaults to `member`; also committed to
+ * the site's exported config so `drush cim` does not strip it again.
+ */
+function unifi_access_sync_update_9003() {
+  $config = \Drupal::configFactory()->getEditable('unifi_access_sync.settings');
+  if ($config->get('member_role') === NULL) {
+    $config->set('member_role', 'member')->save();
+    return t('Added member_role = member. `drush unifi:status` now counts current members only.');
+  }
+  return t('member_role was already set to @v; left alone.', ['@v' => $config->get('member_role')]);
 }

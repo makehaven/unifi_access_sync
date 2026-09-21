@@ -37,6 +37,10 @@ phpunit -c core web/modules/custom/unifi_access_sync/tests/src/Kernel/UnifiSyncM
    - `field_badge_requested` matches configured Door Term ID
    - `field_badge_status` = `'active'`
    - `field_member_to_badge` references a user with an email
+   - **and that user is not blocked and holds the `member_role` role** (default
+     `member`). The badge is a qualification and is never revoked (JR,
+     2026-09-21); the role is the membership. Badge alone = 3,314 accounts,
+     ~2,470 of them former members. Badge + role = 848.
 
 2. **Sync Triggers**:
    - **Cron**: Full reconcile throttled to once/hour
@@ -44,8 +48,10 @@ phpunit -c core web/modules/custom/unifi_access_sync/tests/src/Kernel/UnifiSyncM
    - **Drush**: `drush unifi:sync` for manual full reconcile
 
 3. **Reconciliation Logic** (`UnifiSyncManager::reconcile()`):
-   - Compares eligible Drupal emails (`getShouldHaveAccessEmails()`) against UniFi users (`listUsers()`)
-   - Creates missing users; deletes extras only when `allow_delete` is TRUE (otherwise logs them)
+   - Compares eligible Drupal members (`getShouldHaveAccessUserData()`) against UniFi users (`listUsers()`), matched on `user_email` or `email`, with each record's `status`
+   - Missing → `create`; present but `DEACTIVATED` → `reactivate`; present and active → nothing
+   - Active extras → `deactivate` only when `allow_delete` is TRUE (otherwise logged); extras already `DEACTIVATED` are ignored
+   - The amplification valve counts **active** records only
 
 ### Configuration
 
@@ -56,7 +62,8 @@ Settings stored in `unifi_access_sync.settings`, configured via `/admin/config/s
 - `use_key_module` / `api_key_id`: Optional Key module integration for secure token storage
 - `verify_ssl`: Disable for self-signed certs
 - `door_term_id`: Taxonomy term ID representing Door access
-- `allow_delete`: FALSE by default — reconcile logs "Would delete" instead of queueing deletions until this is on (guards the console's non-Drupal users)
+- `allow_delete`: FALSE by default — reconcile logs "Would revoke" instead of queueing deactivations until this is on (guards the console's non-Drupal users)
+- `member_role`: `member` by default — the role a door-badged account must hold to count as a current member; empty disables the check
 
 ### Field Dependencies
 
@@ -114,6 +121,20 @@ could not have healed itself even after creates started working.
 failure direction that matters most: the old status-only check reported those
 refusals as "deleted successfully", so a revoked member would have kept their
 door access with a log line saying otherwise.
+
+**5. Reactivation is `PUT /users/{id}` with `{"status":"ACTIVE"}`.** Verified
+on the live console 2026-09-21 in both directions on a test record
+(`200 {"code":"SUCCESS"}`, read-back confirmed). `reactivateUser()` and
+`deactivateUser()` share `setUserStatus()`. This matters because of the
+2026-09-18 incident (see the site's `docs/DEPLOY_TODO.md`): Pantheon dev
+mass-created ~1,224 real records on the production console, which were then
+deactivated. The console now holds 1,250 records, 23 active and 1,227
+DEACTIVATED, and 372 of the deactivated ones are current members. Creating those again is
+refused (`CODE_ADMIN_EMAIL_EXIST`); they have to be switched back on.
+
+**A record with no `status` is treated as active.** The other reading would
+queue a reactivation per member per hour if the console ever stopped sending
+the field — a new runaway. Only an explicit `DEACTIVATED` triggers a write.
 
 ## Two independent controls — do not conflate them
 

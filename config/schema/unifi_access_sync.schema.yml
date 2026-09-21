@@ -29,3 +29,6 @@ unifi_access_sync.settings:
     allow_delete:
       type: boolean
       label: 'Allow reconcile to delete UniFi users missing from Drupal'
+    member_role:
+      type: string
+      label: 'Role a door-badged account must hold to be a current member'

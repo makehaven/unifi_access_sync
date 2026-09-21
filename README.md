@@ -45,7 +45,19 @@ Go to **Config → System → UniFi Access Sync** and set:
 - **API Token:** Paste the token generated above (sent as `X-API-KEY` header).
 - **Verify SSL:** Uncheck if using a self-signed certificate (common for local IPs).
 - **Door Term ID:** The taxonomy term ID representing the "Door" access level.
-- **Allow deletions:** Off by default. While off, a reconcile only logs "Would delete …" for UniFi users that are not door-badged in Drupal (staff, contractors, visitors the console holds for other reasons). Turn it on only after reviewing that log and confirming the console holds nothing but Drupal-managed members.
+- **Member role:** `member` by default. Door access needs the door badge **and** this role on an unblocked account. The badge is a qualification and is never revoked, so on its own it names every person who ever passed orientation (3,314 on 2026-09-21, ~2,470 of them former members); the role is what says "member now".
+- **Allow deletions:** Off by default. While off, a reconcile only logs "Would revoke …" for *active* UniFi users that are not current door-badged members (staff, contractors, visitors the console holds for other reasons). Records the console already holds as DEACTIVATED are left alone either way — they hold no access. Turn it on only after reviewing that log and confirming the console holds nothing but Drupal-managed members.
+
+### What a reconcile does per member
+| Drupal says | Console holds | Action |
+|---|---|---|
+| should have access | nothing | `create` |
+| should have access | record, `DEACTIVATED` | `reactivate` (`PUT /users/{id}` `{"status":"ACTIVE"}`) — a create would be refused with `CODE_ADMIN_EMAIL_EXIST` |
+| should have access | record, active | nothing |
+| should not | record, active | `deactivate`, only when **Allow deletions** is on; otherwise logged |
+| should not | record, `DEACTIVATED` | nothing |
+
+`drush unifi:status` prints each of these counts read-only. Only **active** console records count toward the amplification valve; a console full of switched-off records is not a roster anyone can open the door with.
 
 ### Important Notes on Resilience and Performance
 - **Asynchronous Processing:** All UniFi API calls (create/delete users) are now processed **asynchronously** via Drupal's Queue API. This prevents cron execution timeouts and improves site responsiveness. You can monitor the `unifi_access_sync_queue` via `drush queue:list` and process it with `drush queue:run unifi_access_sync_queue`.

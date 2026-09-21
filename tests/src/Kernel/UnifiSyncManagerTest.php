@@ -14,6 +14,7 @@ use Drupal\taxonomy\Entity\Vocabulary;
 use Drupal\unifi_access_sync\Service\UnifiApiResult;
 use Drupal\unifi_access_sync\Service\UnifiApiService;
 use Drupal\unifi_access_sync\Service\UnifiSyncManager;
+use Drupal\user\Entity\Role;
 use Drupal\user\Entity\User;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -85,6 +86,13 @@ class UnifiSyncManagerTest extends KernelTestBase {
     // which is exactly what most of these assert. Tests that care about the
     // switch itself set it back to FALSE explicitly.
     $this->config('unifi_access_sync.settings')->set('sync_enabled', TRUE)->save();
+
+    // member_role ships as `member`: door access needs the badge AND a current
+    // membership. The fixtures below create bare users to test everything
+    // else, so the role check is switched off here and switched back on by
+    // the tests that are about it.
+    $this->config('unifi_access_sync.settings')->set('member_role', '')->save();
+    Role::create(['id' => 'member', 'label' => 'Member'])->save();
 
     NodeType::create([
       'type' => 'badge_request',
@@ -842,6 +850,177 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertSame(9, $status['missing']);
     $this->assertTrue($status['valve_would_block']);
     $this->assertCount(0, $this->queuedItems, 'status() must not enqueue anything.');
+  }
+
+
+  /**
+   * Creates a door term, points config at it, and returns it.
+   */
+  protected function doorTerm(): Term {
+    $door_term = Term::create(['name' => 'Main Door', 'vid' => 'badges']);
+    $door_term->save();
+    $this->config('unifi_access_sync.settings')->set('door_term_id', $door_term->id())->save();
+    return $door_term;
+  }
+
+  /**
+   * Creates a user with an active door badge.
+   */
+  protected function badgedUser(Term $door_term, string $email, array $values = []): User {
+    $user = User::create(['name' => $email, 'mail' => $email] + $values);
+    $user->save();
+    Node::create([
+      'type' => 'badge_request',
+      'title' => "Request for $email",
+      'field_badge_requested' => $door_term->id(),
+      'field_badge_status' => 'active',
+      'field_member_to_badge' => $user->id(),
+    ])->save();
+    return $user;
+  }
+
+  /**
+   * The door badge is a qualification; the role is the membership.
+   *
+   * A badge alone named 3,314 accounts on 2026-09-21, ~2,470 of them former
+   * members. Only badge + member role + not blocked should have access.
+   */
+  public function testShouldHaveAccessRequiresCurrentMembership(): void {
+    $door_term = $this->doorTerm();
+    $this->config('unifi_access_sync.settings')->set('member_role', 'member')->save();
+
+    $this->badgedUser($door_term, 'current@example.com', ['roles' => ['member'], 'status' => 1]);
+    $this->badgedUser($door_term, 'former@example.com', ['status' => 1]);
+    $this->badgedUser($door_term, 'blocked@example.com', ['roles' => ['member'], 'status' => 0]);
+
+    UnifiSyncManager::resetCache();
+    $should = $this->getSyncManager()->getShouldHaveAccessUserData();
+
+    $this->assertSame(['current@example.com'], array_keys($should));
+  }
+
+  /**
+   * With member_role empty, the badge alone is enough (the pre-2026-09 rule).
+   */
+  public function testShouldHaveAccessWithoutRoleFilter(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'former@example.com');
+
+    UnifiSyncManager::resetCache();
+    $this->assertArrayHasKey('former@example.com', $this->getSyncManager()->getShouldHaveAccessUserData());
+  }
+
+  /**
+   * A member the console holds as DEACTIVATED is restored, not re-created.
+   *
+   * On 2026-09-18 Pantheon dev mass-created ~1,224 real records that the
+   * clean-up then deactivated; 372 were current members. A create would be refused
+   * (CODE_ADMIN_EMAIL_EXIST) and they would stay locked out.
+   */
+  public function testReconcileQueuesReactivateForDeactivatedMember(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'sleeping@example.com');
+    $this->badgedUser($door_term, 'awake@example.com');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u_sleep', 'user_email' => 'sleeping@example.com', 'status' => 'DEACTIVATED'],
+        ['id' => 'u_awake', 'user_email' => 'awake@example.com', 'status' => 'ACTIVE'],
+      ]));
+
+    // Two expected, one active: exactly at the 50% floor, so the valve lets
+    // it through and the deactivated one is the only work.
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(1, $this->queuedItems);
+    $this->assertSame('reactivate', $this->queuedItems[0]['action']);
+    $this->assertSame('sleeping@example.com', $this->queuedItems[0]['email']);
+    $this->assertSame('u_sleep', $this->queuedItems[0]['user_id']);
+  }
+
+  /**
+   * The valve counts ACTIVE records only.
+   *
+   * A console full of switched-off records is not a roster anyone can open
+   * the door with, and must not be trusted as one.
+   */
+  public function testValveIgnoresDeactivatedRecords(): void {
+    $door_term = $this->doorTerm();
+    $present = [];
+    for ($i = 1; $i <= 10; $i++) {
+      $this->badgedUser($door_term, "member$i@example.com");
+      $present[] = [
+        'id' => "u$i",
+        'user_email' => "member$i@example.com",
+        'status' => $i <= 2 ? 'ACTIVE' : 'DEACTIVATED',
+      ];
+    }
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: $present));
+
+    $this->getSyncManager()->reconcile();
+    $this->assertCount(0, $this->queuedItems, 'Ten present but only two active is below the floor.');
+
+    $this->getSyncManager()->reconcile(TRUE);
+    $this->assertCount(8, $this->queuedItems, '--force restores the eight switched-off members.');
+    $this->assertSame(['reactivate'], array_unique(array_column($this->queuedItems, 'action')));
+  }
+
+  /**
+   * An extra that is already DEACTIVATED holds no access: nothing to revoke.
+   *
+   * Otherwise the 1,227 ex-member records would earn a "Would revoke" line
+   * every hour, and with allow_delete on, a futile PUT each.
+   */
+  public function testReconcileLeavesDeactivatedExtrasAlone(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'member@example.com');
+    $this->config('unifi_access_sync.settings')->set('allow_delete', TRUE)->save();
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u_member', 'user_email' => 'member@example.com', 'status' => 'ACTIVE'],
+        ['id' => 'u_gone', 'user_email' => 'gone@example.com', 'status' => 'DEACTIVATED'],
+        ['id' => 'u_stray', 'user_email' => 'stray@example.com', 'status' => 'ACTIVE'],
+      ]));
+
+    $this->getSyncManager()->reconcile();
+
+    $this->assertCount(1, $this->queuedItems);
+    $this->assertSame('deactivate', $this->queuedItems[0]['action']);
+    $this->assertSame('stray@example.com', $this->queuedItems[0]['email']);
+  }
+
+  /**
+   * status() reports the active/deactivated split the seed decision needs.
+   */
+  public function testStatusSplitsActiveAndDeactivated(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'a@example.com');
+    $this->badgedUser($door_term, 'b@example.com');
+    $this->badgedUser($door_term, 'c@example.com');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'ua', 'user_email' => 'a@example.com', 'status' => 'ACTIVE'],
+        ['id' => 'ub', 'user_email' => 'b@example.com', 'status' => 'DEACTIVATED'],
+        ['id' => 'ux', 'user_email' => 'x@example.com', 'status' => 'ACTIVE'],
+        ['id' => 'uy', 'user_email' => 'y@example.com', 'status' => 'DEACTIVATED'],
+      ]));
+
+    $s = $this->getSyncManager()->status();
+
+    $this->assertSame(3, $s['expected']);
+    $this->assertSame(2, $s['present'], 'ACTIVE records only');
+    $this->assertSame(2, $s['present_deactivated']);
+    $this->assertSame(1, $s['missing'], 'c has no record');
+    $this->assertSame(1, $s['reactivate'], 'b is present but switched off');
+    $this->assertSame(1, $s['extra'], 'x is active and not vouched for; y is already off');
+    $this->assertFalse($s['valve_would_block'], '2 active of 3 expected meets the 50% floor');
   }
 
 }

@@ -54,6 +54,17 @@ class UnifiSyncManager {
   private UnifiApiService $api;
 
   /**
+   * Card / door policy / photo provisioning for present members.
+   *
+   * Optional so older wiring (and tests) that construct the manager without
+   * it keep working; with no provisioner nothing beyond create / reactivate /
+   * deactivate happens, exactly as before.
+   *
+   * @var \Drupal\unifi_access_sync\Service\UnifiProvisioner|null
+   */
+  private ?UnifiProvisioner $provisioner;
+
+  /**
    * Static cache for UniFi users map. Keyed by email.
    *
    * @var array|null
@@ -75,7 +86,9 @@ class UnifiSyncManager {
     LoggerChannelInterface $log,
     UnifiApiService $api,
     QueueFactory $queue_factory,
+    ?UnifiProvisioner $provisioner = NULL,
   ) {
+    $this->provisioner = $provisioner;
     $this->etm = $etm;
     $this->cfg = $config_factory->get('unifi_access_sync.settings');
     $this->log = $log;
@@ -174,6 +187,7 @@ class UnifiSyncManager {
     $queue = $this->queueFactory->get('unifi_access_sync_queue');
 
     $held = 0;
+    $provisioning = 0;
     foreach ($should as $key => $data) {
       $email = $data['email'] ?? $key;
       $record = $this->findRecord($have, $key, $data);
@@ -184,6 +198,21 @@ class UnifiSyncManager {
           'email' => $email,
           'user_data' => $data,
         ]);
+      }
+      elseif ($this->isActiveRecord($record) && !empty($record['id'])) {
+        // Present and on: does it have the card, the door and the photo?
+        // needsWork() reads only the listUsers row and state, so this costs
+        // no API call per member, and it backs off for a day after trying.
+        if ($this->provisioner && $this->provisioner->needsWork((array) ($record['raw'] ?? []), (int) ($data['uid'] ?? 0))) {
+          $queue->createItem([
+            'action' => 'provision',
+            'email' => $email,
+            'user_id' => $record['id'],
+            'uid' => (int) $data['uid'],
+            'raw' => self::provisionView((array) ($record['raw'] ?? [])),
+          ]);
+          $provisioning++;
+        }
       }
       elseif (!$this->isActiveRecord($record) && !empty($record['id'])) {
         // Present but switched off. A create would be refused
@@ -199,6 +228,9 @@ class UnifiSyncManager {
           'user_id' => $record['id'],
         ]);
       }
+    }
+    if ($provisioning) {
+      $this->log->notice('Queued UniFi provisioning (card / door policy / photo) for @n member(s).', ['@n' => $provisioning]);
     }
     if ($held) {
       // One line per run, not one per member: this is a standing decision,
@@ -323,6 +355,7 @@ class UnifiSyncManager {
       'executed' => FALSE,
       'ok' => NULL,
       'detail' => '',
+      'provision' => [],
     ];
     $key = mb_strtolower(trim($email));
     $should = $this->getShouldHaveAccessUserData();
@@ -354,11 +387,15 @@ class UnifiSyncManager {
     }
     else {
       $out['reason'] = 'already ACTIVE in the console (record ' . ($record['id'] ?? '?') . ')';
-      return $out;
     }
 
     if (!$execute) {
-      $out['reason'] = 'plan only; pass --execute to perform this one write';
+      if ($out['action'] !== 'none') {
+        $out['reason'] = 'plan only; pass --execute to perform this one write';
+      }
+      if ($record !== NULL && $this->isActiveRecord($record) && !empty($record['id'])) {
+        $out['provision'] = $this->provisionPlan((string) $record['id'], $data, (array) ($record['raw'] ?? []), FALSE);
+      }
       return $out;
     }
     if (!$this->isLiveEnvironment()) {
@@ -366,19 +403,78 @@ class UnifiSyncManager {
       return $out;
     }
 
-    $result = $out['action'] === 'create'
-      ? $this->api->createUser($out['payload'])
-      : $this->api->reactivateUser((string) $record['id']);
-    self::resetCache();
-    $out['executed'] = TRUE;
-    $out['ok'] = $result->ok;
-    $out['reason'] = $result->ok ? 'done' : 'FAILED: ' . $result->describe();
-    $this->log->notice('unifi:sync-one @a for @e: @r', [
-      '@a' => $out['action'],
-      '@e' => $data['email'],
-      '@r' => $out['reason'],
-    ]);
+    $user_id = (string) ($record['id'] ?? '');
+    $raw = (array) ($record['raw'] ?? []);
+    if ($out['action'] !== 'none') {
+      $result = $out['action'] === 'create'
+        ? $this->api->createUser($out['payload'])
+        : $this->api->reactivateUser((string) $record['id']);
+      self::resetCache();
+      $out['executed'] = TRUE;
+      $out['ok'] = $result->ok;
+      $out['reason'] = $result->ok ? 'done' : 'FAILED: ' . $result->describe();
+      $this->log->notice('unifi:sync-one @a for @e: @r', [
+        '@a' => $out['action'],
+        '@e' => $data['email'],
+        '@r' => $out['reason'],
+      ]);
+      if (!$result->ok) {
+        return $out;
+      }
+      if ($out['action'] === 'create') {
+        // The create answer carries the new id; fall back to a fresh read.
+        $user_id = is_array($result->data) ? (string) ($result->data['id'] ?? '') : '';
+        if ($user_id === '') {
+          $again = $this->fetchUnifiUsers();
+          $user_id = (string) ($this->findRecord($again->data ?? [], $key, $data)['id'] ?? '');
+        }
+        $raw = [];
+      }
+    }
+    if ($user_id !== '') {
+      $out['provision'] = $this->provisionPlan($user_id, $data, $raw, TRUE);
+    }
     return $out;
+  }
+
+  /**
+   * The console's access policies (read-only; for `drush unifi:policies`).
+   */
+  public function accessPolicies(): UnifiApiResult {
+    return $this->api->listAccessPolicies();
+  }
+
+  /**
+   * Provisioning steps for one member, or [] when provisioning is off.
+   */
+  private function provisionPlan(string $user_id, array $data, array $raw, bool $execute): array {
+    if (!$this->provisioner || !$this->provisioner->enabled()) {
+      return [];
+    }
+    return $this->provisioner->provision($user_id, (int) ($data['uid'] ?? 0), $raw, $execute);
+  }
+
+  /**
+   * Performs one queued provisioning item (called by the queue worker).
+   */
+  public function provisionQueued(array $item): array {
+    if (!$this->provisioner || empty($item['user_id']) || empty($item['uid'])) {
+      return [];
+    }
+    return $this->provisioner->provision((string) $item['user_id'], (int) $item['uid'], (array) ($item['raw'] ?? []), TRUE);
+  }
+
+  /**
+   * The parts of a console row that provisioning reads, for a queue item.
+   */
+  private static function provisionView(array $raw): array {
+    return [
+      'nfc_cards' => $raw['nfc_cards'] ?? [],
+      'avatar_relative_path' => $raw['avatar_relative_path'] ?? '',
+      // Carried into the queue so the worker re-checks it: provisioning never
+      // touches a record with an address (UnifiProvisioner::carriesEmail()).
+      'has_email' => UnifiProvisioner::carriesEmail($raw),
+    ];
   }
 
   /**
@@ -558,6 +654,8 @@ class UnifiSyncManager {
       'reactivate' => 0,
       'reactivate_held' => 0,
       'extra' => 0,
+      'provision' => 0,
+      'provisioning_enabled' => $this->provisioner?->enabled() ?? FALSE,
     ];
 
     $door_tid = (int) $this->cfg->get('door_term_id');
@@ -589,6 +687,9 @@ class UnifiSyncManager {
       }
       elseif (!$this->isActiveRecord($record)) {
         $this->reactivationHeld($record) ? $out['reactivate_held']++ : $out['reactivate']++;
+      }
+      elseif ($this->provisioner && $this->provisioner->needsWork((array) ($record['raw'] ?? []), (int) ($data['uid'] ?? 0))) {
+        $out['provision']++;
       }
     }
     $vouched = $this->vouchedKeys($should);

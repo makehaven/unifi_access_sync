@@ -477,6 +477,195 @@ class UnifiApiService {
   }
 
   /**
+   * Lists every NFC card the console knows, paginated.
+   *
+   * Each row carries `nfc_id` (uppercase hex, the serial a reader reports),
+   * `token` (what binds a card to a user), `status` (pending|assigned) and
+   * `user_id` (empty when unassigned). Permission key: view:credential.
+   */
+  public function listNfcCards(): UnifiApiResult {
+    $all = [];
+    $page = 1;
+    $size = 200;
+    do {
+      $result = $this->call('GET', '/credentials/nfc_cards/tokens', [
+        'query' => ['page_num' => $page, 'page_size' => $size],
+      ], 'listNfcCards');
+      if (!$result->ok) {
+        return $result;
+      }
+      $rows = is_array($result->data) ? $result->data : [];
+      $all = array_merge($all, $rows);
+      $page++;
+    } while (count($rows) >= $size);
+    return UnifiApiResult::success(data: $all, statusCode: 200);
+  }
+
+  /**
+   * Imports one third-party card serial; returns its token in ->data.
+   *
+   * API reference 6.x: a CSV upload of `nfc_id,alias` rows, answered with a
+   * token per row, where an empty token means that row failed. Aliases must
+   * be unique, so the alias is the member's employee_number
+   * ("drupal-{uid}"). Permission key: edit:credential.
+   */
+  public function importNfcCard(string $nfc_id, string $alias): UnifiApiResult {
+    $result = $this->call('POST', '/credentials/nfc_cards/import', [
+      'multipart' => [
+        [
+          'name' => 'file',
+          'contents' => strtoupper($nfc_id) . ',' . $alias . "\n",
+          'filename' => 'nfc_cards.csv',
+          'headers' => ['Content-Type' => 'text/csv'],
+        ],
+      ],
+    ], 'importNfcCard');
+    if (!$result->ok) {
+      return $result;
+    }
+    foreach ((array) $result->data as $row) {
+      if (strcasecmp((string) ($row['nfc_id'] ?? ''), $nfc_id) === 0 && !empty($row['token'])) {
+        return UnifiApiResult::success(data: (string) $row['token'], statusCode: $result->statusCode);
+      }
+    }
+    return UnifiApiResult::failure('importNfcCard: the console returned no token for ' . $nfc_id . ' (import refused for that row).', $result->statusCode);
+  }
+
+  /**
+   * Binds an imported card (by token) to a console user.
+   *
+   * `force_add` is always FALSE: a card already bound to someone else is
+   * refused rather than silently moved, because a member's serial landing on
+   * the wrong record is a door-access fault to be looked at, not overwritten.
+   * Permission key: edit:user.
+   */
+  public function assignNfcCard(string $user_id, string $token): UnifiApiResult {
+    return $this->call('PUT', '/users/' . rawurlencode($user_id) . '/nfc_cards', [
+      'json' => ['token' => $token, 'force_add' => FALSE],
+    ], 'assignNfcCard');
+  }
+
+  /**
+   * The access policy ids assigned directly to a user.
+   *
+   * `only_user_policies=true` so group-inherited policies are not mistaken
+   * for direct ones (a later PUT replaces the direct list only).
+   */
+  public function getUserPolicyIds(string $user_id): UnifiApiResult {
+    $result = $this->call('GET', '/users/' . rawurlencode($user_id) . '/access_policies', [
+      'query' => ['only_user_policies' => 'true'],
+    ], 'getUserPolicyIds');
+    if (!$result->ok) {
+      return $result;
+    }
+    $ids = [];
+    foreach ((array) $result->data as $policy) {
+      if (!empty($policy['id'])) {
+        $ids[] = (string) $policy['id'];
+      }
+    }
+    return UnifiApiResult::success(data: $ids, statusCode: $result->statusCode);
+  }
+
+  /**
+   * Sets a user's direct access policies.
+   *
+   * **This REPLACES the user's list** (the reference's own example clears
+   * every policy with an empty array). Callers must pass the union of what
+   * the user already has and what they need — see UnifiProvisioner.
+   * Refuses an empty list outright: that would lock the member out.
+   */
+  public function setUserPolicies(string $user_id, array $policy_ids): UnifiApiResult {
+    $policy_ids = array_values(array_unique(array_filter(array_map('strval', $policy_ids))));
+    if (!$policy_ids) {
+      return UnifiApiResult::failure('Refused: an empty policy list would remove every policy from the user.');
+    }
+    return $this->call('PUT', '/users/' . rawurlencode($user_id) . '/access_policies', [
+      'json' => ['access_policy_ids' => $policy_ids],
+    ], 'setUserPolicies');
+  }
+
+  /**
+   * Lists the console's access policies (for choosing access_policy_ids).
+   *
+   * Permission key: view:policy.
+   */
+  public function listAccessPolicies(): UnifiApiResult {
+    return $this->call('GET', '/access_policies', [], 'listAccessPolicies');
+  }
+
+  /**
+   * Uploads a user's profile picture (shown on the intercom at unlock).
+   *
+   * Supported only for local users, which is what this module creates.
+   * Permission key: edit:user.
+   */
+  public function uploadAvatar(string $user_id, string $bytes, string $filename, string $mime): UnifiApiResult {
+    return $this->call('POST', '/users/' . rawurlencode($user_id) . '/avatar', [
+      'multipart' => [
+        [
+          'name' => 'file',
+          'contents' => $bytes,
+          'filename' => $filename,
+          'headers' => ['Content-Type' => $mime],
+        ],
+      ],
+    ], 'uploadAvatar');
+  }
+
+  /**
+   * One request, with every failure shape reduced to a UnifiApiResult.
+   *
+   * Same handling as the user calls above: non-2xx, a transport error, or an
+   * error envelope inside HTTP 200 are all failures (see decodeEnvelope()).
+   * `json` bodies get the JSON content type; `multipart` bodies must not, so
+   * the header is dropped for them.
+   */
+  private function call(string $method, string $path, array $options, string $what): UnifiApiResult {
+    if (!$this->isConfigured()) {
+      return UnifiApiResult::failure('UniFi API not configured (missing host or token).');
+    }
+    $headers = $this->headers();
+    if (isset($options['multipart'])) {
+      unset($headers['Content-Type']);
+    }
+    try {
+      $res = $this->http->request($method, $this->base() . $path, $options + [
+        'headers' => $headers,
+        'verify' => $this->verify(),
+        'timeout' => 20,
+      ]);
+      $status = $res->getStatusCode();
+      if ($status < 200 || $status >= 300) {
+        $body = $this->trimForLog((string) $res->getBody());
+        $this->log->error('UniFi @w returned HTTP @code. Response: @body', [
+          '@w' => $what,
+          '@code' => $status,
+          '@body' => $body,
+        ]);
+        return UnifiApiResult::failure($what . ' non-2xx response', $status, $body);
+      }
+      return $this->decodeEnvelope($status, (string) $res->getBody(), $what);
+    }
+    catch (RequestException $e) {
+      $response = $e->getResponse();
+      $status = $response?->getStatusCode();
+      $body = $response ? $this->trimForLog((string) $response->getBody()) : NULL;
+      $this->log->error('UniFi @w HTTP error @code: @m. Body: @body', [
+        '@w' => $what,
+        '@code' => $status ?? 'n/a',
+        '@m' => $e->getMessage(),
+        '@body' => $body ?? '',
+      ]);
+      return UnifiApiResult::failure($e->getMessage(), $status, $body);
+    }
+    catch (\Throwable $e) {
+      $this->log->error('UniFi @w exception: @m', ['@w' => $what, '@m' => $e->getMessage()]);
+      return UnifiApiResult::failure('Exception: ' . $e->getMessage());
+    }
+  }
+
+  /**
    * Builds the API payload for creating a user — deliberately without email.
    *
    * Three facts, all measured on the live console (2026-09-17/18):

@@ -35,3 +35,15 @@ unifi_access_sync.settings:
     reactivate_emailed_records:
       type: boolean
       label: 'Reactivate switched-off console records that carry an email address'
+    provision_nfc_cards:
+      type: boolean
+      label: 'Import each member card serial and bind it to their console record'
+    access_policy_ids:
+      type: sequence
+      label: 'Access policies every member is given (added, never replacing)'
+      sequence:
+        type: string
+        label: 'Access policy id'
+    provision_avatars:
+      type: boolean
+      label: 'Upload the member headshot when the console record has no picture'

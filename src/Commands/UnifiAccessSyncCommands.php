@@ -54,6 +54,9 @@ class UnifiAccessSyncCommands extends DrushCommands {
     $o->writeln(sprintf('To reactivate:      %d  (members present but switched off)', $s['reactivate']));
     $o->writeln(sprintf('Reactivation held:  %d  (switched-off records that carry an email address; reactivate_emailed_records is off)', $s['reactivate_held']));
     $o->writeln(sprintf('Extra (active):     %d  (active in the console, not a current door-badged member)', $s['extra']));
+    $o->writeln(sprintf('To provision:       %s', $s['provisioning_enabled']
+      ? $s['provision'] . '  (active members missing card / door policy / photo, not tried in the last day)'
+      : 'off (provision_nfc_cards, access_policy_ids and provision_avatars all unset)'));
     $o->writeln('');
 
     if (!$s['enabled']) {
@@ -96,6 +99,38 @@ class UnifiAccessSyncCommands extends DrushCommands {
       $o->writeln('Payload:  ' . json_encode($r['payload'], JSON_UNESCAPED_SLASHES));
     }
     $o->writeln('Result:   ' . $r['reason']);
+    foreach ($r['provision'] ?? [] as $step => $s) {
+      $state = $s['ok'] === TRUE ? 'DONE' : ($s['ok'] === FALSE ? 'FAILED' : ($s['do'] ? 'would' : '-'));
+      $o->writeln(sprintf('  %-6s %-7s %s', $step, $state, $s['detail']));
+    }
+    if (empty($r['provision']) && $r['action'] === 'create' && !$r['executed']) {
+      $o->writeln('  (card / door / photo are planned once the record exists)');
+    }
+  }
+
+  /**
+   * List the console's access policies, to choose access_policy_ids.
+   *
+   * Read-only. Needs the token to carry the view:policy permission; a
+   * CODE_UNAUTHORIZED answer means the token must be reissued with it.
+   *
+   * @command unifi:policies
+   * @usage drush unifi:policies
+   *   Print each policy's id, name and the doors or groups it covers.
+   */
+  public function policies(): void {
+    $r = $this->mgr->accessPolicies();
+    $o = $this->output();
+    if (!$r->ok) {
+      $o->writeln('Could not list policies: ' . $r->describe());
+      $o->writeln('A CODE_UNAUTHORIZED here means the API token lacks view:policy.');
+      return;
+    }
+    foreach ((array) $r->data as $p) {
+      $resources = array_map(fn($x) => ($x['type'] ?? '?') . ':' . ($x['id'] ?? '?'), (array) ($p['resources'] ?? []));
+      $o->writeln(sprintf('%s  %s  [%s]', $p['id'] ?? '?', $p['name'] ?? '?', implode(', ', $resources)));
+    }
+    $o->writeln('Set with: drush cset unifi_access_sync.settings access_policy_ids --input-format=yaml \'["<id>"]\'');
   }
 
   /**

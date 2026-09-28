@@ -7,3 +7,6 @@ door_term_id: 0
 allow_delete: false
 member_role: member
 reactivate_emailed_records: false
+provision_nfc_cards: false
+access_policy_ids: {  }
+provision_avatars: false

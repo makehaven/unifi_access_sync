@@ -163,3 +163,24 @@ function unifi_access_sync_update_9004() {
     '@v' => var_export($config->get('reactivate_emailed_records'), TRUE),
   ]);
 }
+
+/**
+ * Add card / door policy / photo provisioning settings, all off.
+ *
+ * A console record with a name does not open the intercom: it also needs the
+ * member's card, an access policy for the door and (nice to have) their
+ * photo. See UnifiProvisioner. Everything ships off; the one-member trial is
+ * `drush unifi:sync-one <email> --execute` after setting them.
+ */
+function unifi_access_sync_update_9005() {
+  $config = \Drupal::configFactory()->getEditable('unifi_access_sync.settings');
+  $added = [];
+  foreach (['provision_nfc_cards' => FALSE, 'access_policy_ids' => [], 'provision_avatars' => FALSE] as $k => $v) {
+    if ($config->get($k) === NULL) {
+      $config->set($k, $v);
+      $added[] = $k;
+    }
+  }
+  $config->save();
+  return $added ? t('Added @k (all off).', ['@k' => implode(', ', $added)]) : t('Provisioning settings already present; left alone.');
+}

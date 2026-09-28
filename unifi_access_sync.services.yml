@@ -8,9 +8,13 @@ services:
     class: 'Drupal\unifi_access_sync\Service\UnifiApiService'
     arguments: ['@http_client', '@config.factory', '@logger.channel.unifi_access_sync', '@?key.repository']
 
+  unifi_access_sync.provisioner:
+    class: 'Drupal\unifi_access_sync\Service\UnifiProvisioner'
+    arguments: ['@entity_type.manager', '@config.factory', '@logger.channel.unifi_access_sync', '@unifi_access_sync.api', '@state']
+
   unifi_access_sync.sync_manager:
     class: 'Drupal\unifi_access_sync\Service\UnifiSyncManager'
-    arguments: ['@entity_type.manager', '@config.factory', '@logger.channel.unifi_access_sync', '@unifi_access_sync.api', '@queue']
+    arguments: ['@entity_type.manager', '@config.factory', '@logger.channel.unifi_access_sync', '@unifi_access_sync.api', '@queue', '@unifi_access_sync.provisioner']
 
   # Drush commands are declared in drush.services.yml — Drush 13 does not
   # discover them from this file.

@@ -180,6 +180,32 @@ class UnifiSettingsForm extends ConfigFormBase {
       '#default_value' => (bool) $cfg->get('allow_delete'),
     ];
 
+    $form['provisioning'] = [
+      '#type' => 'details',
+      '#title' => $this->t('Intercom provisioning (card, door, photo)'),
+      '#open' => TRUE,
+      '#description' => $this->t("A console record with a name does not open the intercom by itself. These add the member's card, a door policy and their photo to ACTIVE records. All off by default; try one member first with <code>drush unifi:sync-one EMAIL --execute</code>. The API token needs edit:user, edit:credential, view:credential and view:policy."),
+    ];
+    $form['provisioning']['provision_nfc_cards'] = [
+      '#type' => 'checkbox',
+      '#title' => $this->t("Import each member's card serial and bind it to their record"),
+      '#description' => $this->t('A card already bound to another console user is never moved.'),
+      '#default_value' => (bool) $cfg->get('provision_nfc_cards'),
+    ];
+    $form['provisioning']['access_policy_ids'] = [
+      '#type' => 'textarea',
+      '#rows' => 2,
+      '#title' => $this->t('Access policy IDs every member gets'),
+      '#description' => $this->t("One per line (see <code>drush unifi:policies</code>). Added to the member's existing policies, never replacing them. Empty = do not assign."),
+      '#default_value' => implode("\n", (array) ($cfg->get('access_policy_ids') ?? [])),
+    ];
+    $form['provisioning']['provision_avatars'] = [
+      '#type' => 'checkbox',
+      '#title' => $this->t('Upload the member headshot when the record has no picture'),
+      '#description' => $this->t('Shown on the intercom at unlock. A picture set in the console is never replaced.'),
+      '#default_value' => (bool) $cfg->get('provision_avatars'),
+    ];
+
     $form['actions']['test'] = [
       '#type' => 'submit',
       '#value' => $this->t('Test API Connection'),
@@ -231,6 +257,9 @@ class UnifiSettingsForm extends ConfigFormBase {
       ->set('door_term_id', $door_term_id)
       ->set('allow_delete', (bool) $form_state->getValue('allow_delete'))
       ->set('sync_enabled', (bool) $form_state->getValue('sync_enabled'))
+      ->set('provision_nfc_cards', (bool) $form_state->getValue('provision_nfc_cards'))
+      ->set('access_policy_ids', array_values(array_filter(array_map('trim', preg_split('/[\s,]+/', (string) $form_state->getValue('access_policy_ids')) ?: []))))
+      ->set('provision_avatars', (bool) $form_state->getValue('provision_avatars'))
       ->save();
 
     parent::submitForm($form, $form_state);

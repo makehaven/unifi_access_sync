@@ -13,6 +13,7 @@ use Drupal\taxonomy\Entity\Term;
 use Drupal\taxonomy\Entity\Vocabulary;
 use Drupal\unifi_access_sync\Service\UnifiApiResult;
 use Drupal\unifi_access_sync\Service\UnifiApiService;
+use Drupal\unifi_access_sync\Service\UnifiProvisioner;
 use Drupal\unifi_access_sync\Service\UnifiSyncManager;
 use Drupal\user\Entity\Role;
 use Drupal\user\Entity\User;
@@ -1084,6 +1085,51 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertSame(1, $s['present']);
     $this->assertSame(0, $s['missing']);
     $this->assertSame(0, $s['extra']);
+  }
+
+  /**
+   * Reconcile queues provisioning for email-less records only.
+   *
+   * The record this module created (no address) gets card/door/photo; a
+   * member whose console record carries an address is never provisioned,
+   * because granting access to such a record can make UniFi send its
+   * Identity invitation (2026-09-18).
+   */
+  public function testReconcileProvisionsOnlyEmaillessRecords(): void {
+    $door_term = $this->doorTerm();
+    $mine = $this->badgedUser($door_term, 'created-by-us@example.com');
+    $emailed = $this->badgedUser($door_term, 'emailed@example.com');
+    $this->config('unifi_access_sync.settings')->set('access_policy_ids', ['front-door'])->save();
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u-mine', 'user_email' => '', 'email' => '', 'employee_number' => 'drupal-' . $mine->id(), 'status' => 'ACTIVE', 'nfc_cards' => [], 'avatar_relative_path' => ''],
+        ['id' => 'u-emailed', 'user_email' => 'emailed@example.com', 'email' => '', 'status' => 'ACTIVE', 'nfc_cards' => [], 'avatar_relative_path' => ''],
+      ]));
+
+    $provisioner = new UnifiProvisioner(
+      $this->container->get('entity_type.manager'),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync'),
+      $this->apiMock,
+      $this->container->get('state'),
+    );
+    $manager = new UnifiSyncManager(
+      $this->container->get('entity_type.manager'),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync'),
+      $this->apiMock,
+      $this->queueFactoryMock,
+      $provisioner,
+    );
+    $manager->reconcile();
+
+    $provision = array_values(array_filter($this->queuedItems, fn($i) => $i['action'] === 'provision'));
+    $this->assertCount(1, $provision);
+    $this->assertSame('u-mine', $provision[0]['user_id']);
+    $this->assertFalse($provision[0]['raw']['has_email']);
+    $this->assertSame(1, $manager->status()['provision']);
   }
 
   /**

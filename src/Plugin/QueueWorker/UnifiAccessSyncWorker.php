@@ -176,6 +176,13 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
           }
           break;
 
+        case 'provision':
+          // Card, door policy and photo for a record that is already ACTIVE.
+          // Each step logs its own outcome; UnifiProvisioner records the
+          // attempt so a failing step is retried daily, not hourly.
+          $this->manager->provisionQueued($data);
+          break;
+
         default:
           $this->logger->warning('Unknown UniFi sync action "@action" for user @e.', [
             '@action' => $action,

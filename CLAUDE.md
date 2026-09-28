@@ -229,3 +229,41 @@ the site tables.
 
 - `event_access_unifi`: Creates time-bound visitor passes (QR/PIN) for event registrants
 - `access_unifi_bridge`: Receives UniFi Access webhooks, forwards to access_request workflow
+
+## Intercom provisioning: card, door, photo (2026-09-28)
+
+A console record with a name does not open the UA-Intercom. `UnifiProvisioner`
+(service `unifi_access_sync.provisioner`) adds, for ACTIVE records of current
+members, each behind its own setting and **all off by default** (update 9005):
+
+| Setting | What it does | API (permission) |
+|---|---|---|
+| `provision_nfc_cards` | Imports the member's `field_card_serial_number` (user field, then main profile; uppercase hex; byte-for-byte what the intercom reports, verified 2026-09-14) with alias `drupal-{uid}`, then binds it. `force_add` is always false: **a card bound to another record is never moved**, only reported. | `GET /credentials/nfc_cards/tokens` (view:credential), `POST /credentials/nfc_cards/import` CSV `nfc_id,alias` (edit:credential), `PUT /users/{id}/nfc_cards` (edit:user) |
+| `access_policy_ids` | **Adds** these policies to the member's direct policies. The PUT **replaces** the whole list, so the current list is read first and the union written; an empty list is refused outright. | `GET /users/{id}/access_policies?only_user_policies=true`, `PUT /users/{id}/access_policies` (edit:user); `drush unifi:policies` lists ids (view:policy) |
+| `provision_avatars` | Uploads the member headshot (`profile.main.field_member_photo`, 'large' derivative, JPEG/PNG) **only when the record has no picture**; a console-set picture is never replaced. | `POST /users/{id}/avatar` multipart (edit:user; local users only, which is what we create) |
+
+**Never a record with an email address (hard rule, no setting).** UniFi mails
+its Identity invitation to console users that carry an address, and the
+console's auto-invite also fires when access is *granted* to one — the
+2026-09-18 incident. `UnifiProvisioner::carriesEmail()` (user_email, email,
+profile.email, or a `has_email` flag carried through the queue) makes every
+step skip such a record, in reconcile, the queue worker and `sync-one`. Our
+own creates carry no address, so members are unaffected; staff or 09-18
+leftovers that do carry one must be handled by hand in the console.
+
+**Flood control.** `reconcile()` queues `provision` items only when
+`needsWork()` says so, using just the listUsers row and state: no API call per
+member per hour. Any attempt (success or failure) is recorded in state
+`unifi_access_sync.provision[uid]`, and a member is not looked at again for
+`RETRY_AFTER` (a day). The door policy is remembered per uid, so it is checked
+once, not hourly. A record that already holds any card is not re-checked for
+cards (the list shows only a display id, not the serial).
+
+**Trial path:** set the settings, then `drush unifi:sync-one <email>` (plan)
+and `--execute` on live. For an already-ACTIVE member it provisions directly;
+for a new member it creates, then provisions using the id from the create
+answer. `unifi:status` shows "To provision".
+
+**The 09-14 token lacks view:policy** (`GET /access_policies` →
+`CODE_UNAUTHORIZED`). Reissue it with view:policy, edit:user, view:credential
+and edit:credential before switching the door step on.

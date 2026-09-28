@@ -139,8 +139,9 @@ class UnifiSyncManager {
     // 2026-09-18 dev mass-create and clean-up the console held 1,227
     // DEACTIVATED records; counting
     // those would let the valve trust a roster in which almost nobody can
-    // actually open the door.
-    $active = $this->activeOnly($have);
+    // actually open the door. Counted per RECORD, not per map key: a record
+    // is indexed under each of its addresses and its drupal uid.
+    $active = $this->activeOnly($this->uniqueRecords($have));
 
     // Amplification safety valve. An implausibly small tenant view is almost
     // always a setup, connectivity or API problem (wrong door_term_id, wrong
@@ -172,9 +173,11 @@ class UnifiSyncManager {
 
     $queue = $this->queueFactory->get('unifi_access_sync_queue');
 
+    $held = 0;
     foreach ($should as $key => $data) {
       $email = $data['email'] ?? $key;
-      if (!isset($have[$key])) {
+      $record = $this->findRecord($have, $key, $data);
+      if ($record === NULL) {
         $this->log->notice('Queueing UniFi user creation for @e', ['@e' => $email]);
         $queue->createItem([
           'action' => 'create',
@@ -182,21 +185,32 @@ class UnifiSyncManager {
           'user_data' => $data,
         ]);
       }
-      elseif (!$this->isActiveRecord($have[$key]) && !empty($have[$key]['id'])) {
+      elseif (!$this->isActiveRecord($record) && !empty($record['id'])) {
         // Present but switched off. A create would be refused
         // (CODE_ADMIN_EMAIL_EXIST) and the member would stay locked out.
+        if ($this->reactivationHeld($record)) {
+          $held++;
+          continue;
+        }
         $this->log->notice('Queueing UniFi reactivation for @e', ['@e' => $email]);
         $queue->createItem([
           'action' => 'reactivate',
           'email' => $email,
-          'user_id' => $have[$key]['id'],
+          'user_id' => $record['id'],
         ]);
       }
     }
-    foreach ($have as $email => $user) {
+    if ($held) {
+      // One line per run, not one per member: this is a standing decision,
+      // and 368 notices an hour would bury everything else.
+      $this->log->notice('Held @n UniFi reactivation(s): those console records carry an email address, and reactivate_emailed_records is off. See UnifiSyncManager::reactivationHeld().', ['@n' => $held]);
+    }
+    $vouched = $this->vouchedKeys($should);
+    foreach ($this->uniqueRecords($have) as $user) {
+      $email = $this->labelFor($user);
       // A record that is already DEACTIVATED holds no access; there is
       // nothing to revoke and nothing worth a log line every hour.
-      if (!isset($should[$email]) && !empty($user['id']) && $this->isActiveRecord($user)) {
+      if (!array_intersect_key(array_flip($user['keys']), $vouched) && !empty($user['id']) && $this->isActiveRecord($user)) {
         if (!$this->deletesAllowed()) {
           $this->log->notice('Would revoke UniFi access for @e (not door-badged in Drupal) — revocation is disabled (allow_delete).', ['@e' => $email]);
           continue;
@@ -231,9 +245,11 @@ class UnifiSyncManager {
       return;
     }
     $have = $fetch->data ?? [];
-    // The UniFi side is indexed lowercase; match on the same footing.
+    // The UniFi side is indexed lowercase; match on the same footing, then by
+    // drupal uid — records this module creates carry no address at all.
     $key = mb_strtolower($email);
-    $exists = isset($have[$key]);
+    $record = $this->findRecord($have, $key, $user_data);
+    $exists = $record !== NULL;
 
     $queue = $this->queueFactory->get('unifi_access_sync_queue');
 
@@ -245,15 +261,19 @@ class UnifiSyncManager {
         'user_data' => $user_data,
       ]);
     }
-    elseif ($should_have && $exists && !$this->isActiveRecord($have[$key]) && !empty($have[$key]['id'])) {
+    elseif ($should_have && $exists && !$this->isActiveRecord($record) && !empty($record['id'])) {
+      if ($this->reactivationHeld($record)) {
+        $this->log->notice('Held UniFi reactivation for @e: the console record carries an email address and reactivate_emailed_records is off.', ['@e' => $email]);
+        return;
+      }
       $this->log->notice('Queueing single UniFi reactivation for @e', ['@e' => $email]);
       $queue->createItem([
         'action' => 'reactivate',
         'email' => $email,
-        'user_id' => $have[$key]['id'],
+        'user_id' => $record['id'],
       ]);
     }
-    elseif (!$should_have && $exists && !empty($have[$key]['id']) && $this->isActiveRecord($have[$key])) {
+    elseif (!$should_have && $exists && !empty($record['id']) && $this->isActiveRecord($record)) {
       if (!$this->deletesAllowed()) {
         $this->log->notice('Would revoke UniFi access for @e — revocation is disabled (allow_delete).', ['@e' => $email]);
         return;
@@ -262,9 +282,103 @@ class UnifiSyncManager {
       $queue->createItem([
         'action' => 'deactivate',
         'email' => $email,
-        'user_id' => $have[$key]['id'],
+        'user_id' => $record['id'],
       ]);
     }
+  }
+
+  /**
+   * Plans — and with $execute, performs — the sync for ONE named member.
+   *
+   * The safe way to prove a change at the door before turning the sync on:
+   * one record, one write, performed immediately rather than queued, and
+   * everything that would be sent is returned so the operator can see there
+   * is no address in it.
+   *
+   * Deliberately does NOT require `sync_enabled`: flipping the switch to
+   * test one record would also open the hourly reconcile and the badge
+   * hooks, which is the opposite of a single-record test. Naming one member
+   * and passing --execute is the consent. It DOES require the live
+   * environment, like every other write — every other environment holds a
+   * clone of live's credentials. It only acts on a current door-badged
+   * member, so it cannot put a non-member on the console.
+   *
+   * @param string $email
+   *   The member's Drupal account email.
+   * @param bool $execute
+   *   FALSE (default) plans only; TRUE performs the one write.
+   * @param bool $reactivate_emailed
+   *   TRUE to reactivate even a record that carries an email address — the
+   *   one-record test that decides reactivate_emailed_records.
+   *
+   * @return array
+   *   Keys: action (create|reactivate|none), reason, payload, executed, ok,
+   *   detail.
+   */
+  public function syncOne(string $email, bool $execute = FALSE, bool $reactivate_emailed = FALSE): array {
+    $out = [
+      'action' => 'none',
+      'reason' => '',
+      'payload' => NULL,
+      'executed' => FALSE,
+      'ok' => NULL,
+      'detail' => '',
+    ];
+    $key = mb_strtolower(trim($email));
+    $should = $this->getShouldHaveAccessUserData();
+    if (!isset($should[$key])) {
+      $out['reason'] = 'not a current door-badged member (door badge active + member role + unblocked); nothing to sync';
+      return $out;
+    }
+    $data = $should[$key];
+
+    $fetch = $this->fetchUnifiUsers();
+    if (!$fetch->ok) {
+      $out['reason'] = 'listUsers failed: ' . $fetch->describe();
+      return $out;
+    }
+    $record = $this->findRecord($fetch->data ?? [], $key, $data);
+
+    if ($record === NULL) {
+      $out['action'] = 'create';
+      $out['payload'] = $this->api->userPayloadForData($data['email'], $data);
+    }
+    elseif (!$this->isActiveRecord($record) && !empty($record['id'])) {
+      $out['action'] = 'reactivate';
+      $out['payload'] = ['status' => UnifiApiService::STATUS_ACTIVE];
+      $out['detail'] = 'console record ' . $record['id'] . ($record['has_email'] ? ' (carries an email address)' : ' (no email address)');
+      if ($this->reactivationHeld($record) && !$reactivate_emailed) {
+        $out['reason'] = 'held: this record carries an email address; pass --reactivate-emailed to test it on this one member';
+        return $out;
+      }
+    }
+    else {
+      $out['reason'] = 'already ACTIVE in the console (record ' . ($record['id'] ?? '?') . ')';
+      return $out;
+    }
+
+    if (!$execute) {
+      $out['reason'] = 'plan only; pass --execute to perform this one write';
+      return $out;
+    }
+    if (!$this->isLiveEnvironment()) {
+      $out['reason'] = 'REFUSED: not the live environment';
+      return $out;
+    }
+
+    $result = $out['action'] === 'create'
+      ? $this->api->createUser($out['payload'])
+      : $this->api->reactivateUser((string) $record['id']);
+    self::resetCache();
+    $out['executed'] = TRUE;
+    $out['ok'] = $result->ok;
+    $out['reason'] = $result->ok ? 'done' : 'FAILED: ' . $result->describe();
+    $this->log->notice('unifi:sync-one @a for @e: @r', [
+      '@a' => $out['action'],
+      '@e' => $data['email'],
+      '@r' => $out['reason'],
+    ]);
+    return $out;
   }
 
   /**
@@ -338,6 +452,7 @@ class UnifiSyncManager {
         // also lowercased; `email` keeps the address as the member actually
         // has it, and that is what gets sent to the API.
         $result[mb_strtolower($email)] = [
+          'uid' => (int) $u->id(),
           'email' => $email,
           'first_name' => (string) ($u->get('field_first_name')->value ?? ''),
           'last_name' => (string) ($u->get('field_last_name')->value ?? ''),
@@ -423,7 +538,9 @@ class UnifiSyncManager {
    *   Keys: enabled, live_env, writes_allowed, expected, present (ACTIVE
    *   console users), present_deactivated, floor, valve_would_block,
    *   reachable, error, missing (create needed), reactivate (present but
-   *   DEACTIVATED), extra (ACTIVE in the console, not vouched for by Drupal).
+   *   DEACTIVATED), reactivate_held (DEACTIVATED records carrying an email
+   *   address, held while reactivate_emailed_records is off), extra (ACTIVE
+   *   in the console, not vouched for by Drupal).
    */
   public function status(): array {
     $out = [
@@ -439,6 +556,7 @@ class UnifiSyncManager {
       'error' => NULL,
       'missing' => 0,
       'reactivate' => 0,
+      'reactivate_held' => 0,
       'extra' => 0,
     ];
 
@@ -460,16 +578,111 @@ class UnifiSyncManager {
 
     $have = $fetch->data ?? [];
     $out['reachable'] = TRUE;
-    $active = $this->activeOnly($have);
+    $records = $this->uniqueRecords($have);
+    $active = $this->activeOnly($records);
     $out['present'] = count($active);
-    $out['present_deactivated'] = count($have) - count($active);
-    $out['missing'] = count(array_diff_key($should, $have));
-    $present_expected = array_intersect_key($have, $should);
-    $out['reactivate'] = count(array_filter($present_expected, fn(array $u) => !$this->isActiveRecord($u)));
-    $out['extra'] = count(array_diff_key($active, $should));
+    $out['present_deactivated'] = count($records) - count($active);
+    foreach ($should as $key => $data) {
+      $record = $this->findRecord($have, $key, $data);
+      if ($record === NULL) {
+        $out['missing']++;
+      }
+      elseif (!$this->isActiveRecord($record)) {
+        $this->reactivationHeld($record) ? $out['reactivate_held']++ : $out['reactivate']++;
+      }
+    }
+    $vouched = $this->vouchedKeys($should);
+    foreach ($active as $record) {
+      if (!array_intersect_key(array_flip($record['keys']), $vouched)) {
+        $out['extra']++;
+      }
+    }
     $out['valve_would_block'] = !$this->tenantViewIsPlausible($out['expected'], $out['present']);
 
     return $out;
+  }
+
+  /**
+   * The map key under which a console record is indexed by drupal uid.
+   */
+  private static function uidKey(int $uid): string {
+    return '#uid:' . $uid;
+  }
+
+  /**
+   * Finds a member's console record: by address first, then by drupal uid.
+   *
+   * Address first so the records that already exist (console-UI users and
+   * the 2026-09-18 mass-create, all of which carry an address) keep matching
+   * exactly as before; uid second for the records this module now creates
+   * without one. The uid match also survives a member changing their email.
+   */
+  private function findRecord(array $have, string $email_key, array $data): ?array {
+    if (isset($have[$email_key])) {
+      return $have[$email_key];
+    }
+    $uid = (int) ($data['uid'] ?? 0);
+    if ($uid > 0 && isset($have[self::uidKey($uid)])) {
+      return $have[self::uidKey($uid)];
+    }
+    return NULL;
+  }
+
+  /**
+   * Every key under which a record would count as vouched for by Drupal.
+   */
+  private function vouchedKeys(array $should): array {
+    $keys = [];
+    foreach ($should as $key => $data) {
+      $keys[$key] = TRUE;
+      if (!empty($data['uid'])) {
+        $keys[self::uidKey((int) $data['uid'])] = TRUE;
+      }
+    }
+    return $keys;
+  }
+
+  /**
+   * The indexed console map collapsed back to one entry per record.
+   *
+   * The map holds a record once per address and once per uid, so counting
+   * or iterating its keys would count people twice.
+   */
+  private function uniqueRecords(array $have): array {
+    $out = [];
+    foreach ($have as $key => $entry) {
+      $id = isset($entry['id']) && $entry['id'] !== '' ? 'id:' . $entry['id'] : 'key:' . $key;
+      if (!isset($out[$id])) {
+        $entry['keys'] = $entry['keys'] ?? [$key];
+        $out[$id] = $entry;
+      }
+    }
+    return $out;
+  }
+
+  /**
+   * A human label for a record in log lines: its first address, else its key.
+   */
+  private function labelFor(array $record): string {
+    return (string) ($record['keys'][0] ?? ($record['id'] ?? '(unknown)'));
+  }
+
+  /**
+   * Whether reactivating this record is being held back.
+   *
+   * Reactivation sends `{"status":"ACTIVE"}` and nothing else, so it cannot
+   * *give* a record an address. But the 368 current members switched off
+   * since 2026-09-18 already carry one (the dev mass-create sent
+   * `user_email`), and it has not been shown that flipping such a record back
+   * to ACTIVE does not make UniFi (re)send its Identity invitation — those
+   * invitations expired after 7 days. Until one record has been reactivated
+   * and watched (`drush unifi:sync-one <email> --execute
+   * --reactivate-emailed`), these are held. `reactivate_emailed_records`
+   * TRUE releases them. Records this module creates carry no address and are
+   * never held.
+   */
+  public function reactivationHeld(array $record): bool {
+    return !empty($record['has_email']) && !$this->cfg->get('reactivate_emailed_records');
   }
 
   /**
@@ -560,10 +773,28 @@ class UnifiSyncManager {
       // actions (reactivate vs create) and different counting (the valve
       // must not trust a console full of switched-off records).
       $status = strtoupper((string) ($u['status'] ?? ''));
+      $keys = [];
       foreach ($addresses as $email) {
         if (is_string($email) && $email !== '') {
-          $map[mb_strtolower($email)] = ['id' => $id, 'status' => $status, 'raw' => $u];
+          $keys[] = mb_strtolower($email);
         }
+      }
+      // Records this module creates carry no address (see
+      // UnifiApiService::userPayloadForData()); they are found by the
+      // "drupal-{uid}" employee_number instead.
+      $uid = UnifiApiService::uidFromEmployeeNumber($u['employee_number'] ?? NULL);
+      if ($uid !== NULL) {
+        $keys[] = self::uidKey($uid);
+      }
+      $entry = [
+        'id' => $id,
+        'status' => $status,
+        'has_email' => count(array_filter($keys, fn(string $k) => !str_starts_with($k, '#uid:'))) > 0,
+        'keys' => array_values(array_unique($keys)),
+        'raw' => $u,
+      ];
+      foreach ($entry['keys'] as $k) {
+        $map[$k] = $entry;
       }
     }
     self::$userCache = $map;

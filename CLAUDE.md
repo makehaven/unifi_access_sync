@@ -96,7 +96,8 @@ is the single place this is handled; route every new call through it.
 **Checking the HTTP status alone is what produced 168,763 "created
 successfully" log entries against a console that gained nothing.**
 
-**2. The create payload is flat, and the email field is `user_email`.**
+**2. The create payload is flat, and the email field is `user_email`** — which
+this module no longer sends; see "Never send the console an email address".
 
 | shape | result |
 |---|---|
@@ -135,6 +136,39 @@ refused (`CODE_ADMIN_EMAIL_EXIST`); they have to be switched back on.
 **A record with no `status` is treated as active.** The other reading would
 queue a reactivation per member per hour if the console ever stopped sending
 the field — a new runaway. Only an explicit `DEACTIVATED` triggers a write.
+
+## Never send the console an email address (2026-09-27)
+
+**A console user that has an email address gets UniFi's "Welcome to UniFi
+Identity!" invitation** from `identity@ui.com` ("You have been invited to
+access UniFi Identity resources on this site: MakeHaven Dream Machine Pro",
+UniFi Endpoint download links, 7-day credential). That is what members
+received on 2026-09-18, when every record the dev mass-create made carried
+`user_email` (evidence: Phil Bernstein's forward to JR, 09-21). The Developer
+API has no parameter to suppress it: the documented invitation endpoint
+`POST /users/identity/invitations` (API ref §10.1) is not something we call,
+and the console-side "UniFi Endpoint Email Invite → Send Automatically To New
+People" setting fires on the console's own terms.
+
+So:
+- **Creates are `{first_name, last_name, employee_number}` only.**
+  `employee_number` = `drupal-{uid}` (API ref §3.2, optional free text) is the
+  join key; `fetchUnifiUsers()` indexes records by address AND by
+  `#uid:{uid}`, and `findRecord()` tries address first, then uid.
+- `createUser()` **refuses** any payload containing `user_email` or `email`,
+  before any HTTP request. Do not remove that guard.
+- The queue worker drops a `create` item with no `uid` (it could never be
+  matched again → hourly re-create).
+- **Reactivation** is `PUT {"status":"ACTIVE"}` only, so it cannot add an
+  address. But the ~368 switched-off current members already carry the
+  address from 09-18, and whether re-activating one re-sends the invitation is
+  **untested**. They are held (`reactivate_emailed_records`, default FALSE,
+  update 9004) and reported by `unifi:status` as "Reactivation held".
+- `drush unifi:sync-one <email>` plans (and with `--execute` performs) the
+  sync for one current member, printing the exact payload. It does not need
+  `sync_enabled` (flipping that to test one record would open cron and the
+  badge hooks) but does need live. `--reactivate-emailed` is the one-record
+  trial that decides `reactivate_emailed_records`.
 
 ## Two independent controls — do not conflate them
 

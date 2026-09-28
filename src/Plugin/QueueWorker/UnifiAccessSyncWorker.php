@@ -99,6 +99,16 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
     try {
       switch ($action) {
         case 'create':
+          // The console record is created without an email address, so the
+          // drupal uid (stamped as employee_number) is the only thing that
+          // lets the next reconcile recognise it. A create without one would
+          // look missing forever and be re-created every hour — the
+          // 2026-09-15 runaway shape. Items queued by an older release lack
+          // it; they are dropped and reconcile() re-queues them properly.
+          if (empty($user_data['uid'])) {
+            $this->logger->error('Refused to create UniFi user @e: queued item has no drupal uid to stamp as employee_number.', ['@e' => $email]);
+            break;
+          }
           $payload = $this->api->userPayloadForData($email, $user_data);
           $result = $this->api->createUser($payload);
           if ($result->ok) {

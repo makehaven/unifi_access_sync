@@ -195,12 +195,12 @@ class UnifiApiServiceTest extends KernelTestBase {
     );
 
     // Success create.
-    $result = $apiService->createUser(['user_email' => 'new@example.com']);
+    $result = $apiService->createUser(['first_name' => 'New', 'last_name' => 'Member', 'employee_number' => 'drupal-7']);
     $this->assertTrue($result->ok);
     $this->assertEquals('new_id', $result->data['id']);
 
     // Error create.
-    $result = $apiService->createUser(['user_email' => 'error@example.com']);
+    $result = $apiService->createUser(['first_name' => 'New', 'last_name' => 'Member', 'employee_number' => 'drupal-7']);
     $this->assertFalse($result->ok);
     $this->assertSame(500, $result->statusCode);
 
@@ -265,7 +265,7 @@ class UnifiApiServiceTest extends KernelTestBase {
       $this->container->get('logger.channel.unifi_access_sync')
     );
 
-    $result = $apiService->createUser(['email' => 'nope@example.com']);
+    $result = $apiService->createUser(['first_name' => 'New', 'last_name' => 'Member', 'employee_number' => 'drupal-7']);
 
     $this->assertFalse($result->ok, 'HTTP 200 with an error code must not count as success.');
     $this->assertSame(200, $result->statusCode);
@@ -298,7 +298,7 @@ class UnifiApiServiceTest extends KernelTestBase {
       $this->container->get('logger.channel.unifi_access_sync')
     );
 
-    $result = $apiService->createUser(['email' => 'nope@example.com']);
+    $result = $apiService->createUser(['first_name' => 'New', 'last_name' => 'Member', 'employee_number' => 'drupal-7']);
 
     $this->assertFalse($result->ok);
     $this->assertStringContainsString('The API was not found.', $result->describe());
@@ -356,7 +356,7 @@ class UnifiApiServiceTest extends KernelTestBase {
       $this->container->get('logger.channel.unifi_access_sync')
     );
 
-    $result = $apiService->createUser(['email' => 'yes@example.com']);
+    $result = $apiService->createUser(['first_name' => 'New', 'last_name' => 'Member', 'employee_number' => 'drupal-7']);
 
     $this->assertTrue($result->ok);
     $this->assertSame('created_id', $result->data['id']);
@@ -393,13 +393,14 @@ class UnifiApiServiceTest extends KernelTestBase {
   }
 
   /**
-   * The create payload is flat, matching what listUsers returns.
+   * The create payload is flat and carries NO email address.
    *
-   * Established by probing the live console on 2026-09-17: nested returned
-   * CODE_SYSTEM_ERROR, flat with `email` returned CODE_PARAMS_INVALID, and
-   * flat with `user_email` returned SUCCESS.
+   * Flat: nested returned CODE_SYSTEM_ERROR on the live console (2026-09-17).
+   * No address: a console user created with `user_email` is mailed UniFi's
+   * "Welcome to UniFi Identity!" invitation — what members received on
+   * 2026-09-18. The member is identified by employee_number instead.
    */
-  public function testUserPayloadIsFlat(): void {
+  public function testUserPayloadCarriesNoEmail(): void {
     $apiService = new UnifiApiService(
       new Client(),
       $this->container->get('config.factory'),
@@ -407,16 +408,105 @@ class UnifiApiServiceTest extends KernelTestBase {
     );
 
     $payload = $apiService->userPayloadForData('someone@example.com', [
+      'uid' => 42,
       'first_name' => 'Some',
       'last_name' => 'One',
       'display_name' => 'Some One',
     ]);
 
-    $this->assertArrayNotHasKey('profile', $payload, 'Payload must not nest under profile.');
-    $this->assertArrayNotHasKey('email', $payload, '`email` is read-only on create; the address goes in user_email.');
-    $this->assertSame('someone@example.com', $payload['user_email']);
-    $this->assertSame('Some', $payload['first_name']);
-    $this->assertSame('One', $payload['last_name']);
+    $this->assertSame([
+      'first_name' => 'Some',
+      'last_name' => 'One',
+      'employee_number' => 'drupal-42',
+    ], $payload);
+    $this->assertStringNotContainsString('@', json_encode($payload), 'No address may appear anywhere in the payload.');
+  }
+
+  /**
+   * A nameless member is named from display name, else the address local part.
+   */
+  public function testUserPayloadNameFallbackNeverLeaksTheAddress(): void {
+    $apiService = new UnifiApiService(
+      new Client(),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $payload = $apiService->userPayloadForData('jane.doe@example.com', ['uid' => 5]);
+    $this->assertSame('jane.doe', $payload['first_name']);
+    $this->assertSame('.', $payload['last_name']);
+    $this->assertStringNotContainsString('@', json_encode($payload));
+
+    $payload = $apiService->userPayloadForData('x@example.com', ['uid' => 5, 'display_name' => 'Ada Lovelace']);
+    $this->assertSame('Ada', $payload['first_name']);
+    $this->assertSame('Lovelace', $payload['last_name']);
+  }
+
+  /**
+   * CreateUser() refuses any payload with an address, before any request.
+   */
+  public function testCreateUserRefusesEmailFieldsWithoutCallingTheConsole(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $history = [];
+    $mock = new MockHandler([
+      new Response(200, [], json_encode(['code' => 'SUCCESS', 'data' => ['id' => 'x']])),
+    ]);
+    $stack = HandlerStack::create($mock);
+    $stack->push(\GuzzleHttp\Middleware::history($history));
+    $apiService = new UnifiApiService(
+      new Client(['handler' => $stack]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    foreach (['user_email', 'email'] as $key) {
+      $result = $apiService->createUser(['first_name' => 'A', 'last_name' => 'B', $key => 'a@example.com']);
+      $this->assertFalse($result->ok, "$key must be refused");
+      $this->assertStringContainsString('invitation', (string) $result->errorMessage);
+    }
+    $this->assertCount(0, $history, 'Nothing may be sent to the console.');
+  }
+
+  /**
+   * Reactivation sends status and nothing else — never an address.
+   */
+  public function testReactivateSendsStatusOnly(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 'test-token')
+      ->save();
+
+    $history = [];
+    $stack = HandlerStack::create(new MockHandler([
+      new Response(200, [], json_encode(['code' => 'SUCCESS', 'data' => NULL])),
+    ]));
+    $stack->push(\GuzzleHttp\Middleware::history($history));
+    $apiService = new UnifiApiService(
+      new Client(['handler' => $stack]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+
+    $this->assertTrue($apiService->reactivateUser('abc')->ok);
+    $this->assertCount(1, $history);
+    $this->assertSame('PUT', $history[0]['request']->getMethod());
+    $this->assertSame(['status' => 'ACTIVE'], json_decode((string) $history[0]['request']->getBody(), TRUE));
+  }
+
+  /**
+   * The employee_number round-trips to a uid; anything else is not ours.
+   */
+  public function testEmployeeNumberRoundTrip(): void {
+    $this->assertSame('drupal-123', UnifiApiService::employeeNumberForUid(123));
+    $this->assertSame(123, UnifiApiService::uidFromEmployeeNumber('drupal-123'));
+    $this->assertNull(UnifiApiService::uidFromEmployeeNumber('100000'));
+    $this->assertNull(UnifiApiService::uidFromEmployeeNumber('drupal-'));
+    $this->assertNull(UnifiApiService::uidFromEmployeeNumber('drupal-12x'));
+    $this->assertNull(UnifiApiService::uidFromEmployeeNumber(NULL));
   }
 
   /**

@@ -60,12 +60,12 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
 
     $api->expects($this->once())
       ->method('userPayloadForData')
-      ->with('add@example.com', ['display_name' => 'Add User'])
-      ->willReturn(['profile' => ['email' => 'add@example.com']]);
+      ->with('add@example.com', ['uid' => 9, 'display_name' => 'Add User'])
+      ->willReturn(['first_name' => 'Add', 'last_name' => 'User', 'employee_number' => 'drupal-9']);
 
     $api->expects($this->once())
       ->method('createUser')
-      ->with(['profile' => ['email' => 'add@example.com']])
+      ->with(['first_name' => 'Add', 'last_name' => 'User', 'employee_number' => 'drupal-9'])
       ->willReturn(UnifiApiResult::success(data: ['id' => 'new_id'], statusCode: 201));
 
     $logger->expects($this->once())
@@ -76,7 +76,7 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     $worker->processItem([
       'action' => 'create',
       'email' => 'add@example.com',
-      'user_data' => ['display_name' => 'Add User'],
+      'user_data' => ['uid' => 9, 'display_name' => 'Add User'],
     ]);
   }
 
@@ -89,7 +89,7 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
 
     $api->expects($this->once())
       ->method('userPayloadForData')
-      ->willReturn(['profile' => ['email' => 'add@example.com']]);
+      ->willReturn(['first_name' => 'Add', 'last_name' => 'User', 'employee_number' => 'drupal-9']);
 
     $api->expects($this->once())
       ->method('createUser')
@@ -115,7 +115,26 @@ class UnifiAccessSyncWorkerTest extends UnitTestCase {
     $worker->processItem([
       'action' => 'create',
       'email' => 'add@example.com',
-      'user_data' => ['display_name' => 'Add User'],
+      'user_data' => ['uid' => 9, 'display_name' => 'Add User'],
+    ]);
+  }
+
+  /**
+   * A create queued without a drupal uid is dropped, never sent.
+   *
+   * Without the uid the email-less record could never be matched again and
+   * would be re-created every hour.
+   */
+  public function testProcessItemCreateWithoutUidIsRefused(): void {
+    $api = $this->createMock(UnifiApiService::class);
+    $logger = $this->createMock(LoggerChannelInterface::class);
+    $api->expects($this->never())->method('createUser');
+    $logger->expects($this->once())->method('error')->with($this->stringContains('no drupal uid'));
+
+    $this->worker($api, $logger)->processItem([
+      'action' => 'create',
+      'email' => 'legacy@example.com',
+      'user_data' => ['display_name' => 'Legacy Item'],
     ]);
   }
 

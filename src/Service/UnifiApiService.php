@@ -34,6 +34,30 @@ class UnifiApiService {
   public const STATUS_ACTIVE = 'ACTIVE';
 
   /**
+   * Prefix of the `employee_number` this module stamps on records it creates.
+   *
+   * The record is created WITHOUT an email address (see userPayloadForData()),
+   * so the email can no longer be the join key between a Drupal member and
+   * their console record. `employee_number` = "drupal-{uid}" is. It is a
+   * documented, optional, free-text field on POST /users (API reference 3.2)
+   * that UniFi does not act on.
+   */
+  public const EMPLOYEE_NUMBER_PREFIX = 'drupal-';
+
+  /**
+   * Payload keys that must never reach the console on a write.
+   *
+   * Giving a console user an email address is what makes UniFi send the
+   * "Welcome to UniFi Identity!" invitation (identity@ui.com). On 2026-09-18
+   * every one of ~1,224 records created by Pantheon dev carried
+   * `user_email`, and members received that invitation; Phil Bernstein
+   * forwarded his to JR on 09-21. The Developer API has no parameter to
+   * suppress it — the auto-invite is a console setting — so the only
+   * guarantee this module can give is to never hand the console an address.
+   */
+  private const FORBIDDEN_WRITE_KEYS = ['user_email', 'email'];
+
+  /**
    * The HTTP client.
    *
    * @var \GuzzleHttp\ClientInterface
@@ -289,6 +313,15 @@ class UnifiApiService {
    * Creates a user in UniFi Access.
    */
   public function createUser(array $payload): UnifiApiResult {
+    // Hard stop, not a convention: whoever builds the payload, an address
+    // never leaves this module. See FORBIDDEN_WRITE_KEYS.
+    $forbidden = array_intersect(array_keys($payload), self::FORBIDDEN_WRITE_KEYS);
+    if ($forbidden) {
+      $this->log->error('Refused to create a UniFi user with an email field (@k): an address on a console user makes UniFi email an Identity invitation.', [
+        '@k' => implode(', ', $forbidden),
+      ]);
+      return UnifiApiResult::failure('Refused: payload carries ' . implode(', ', $forbidden) . ' (would trigger a UniFi Identity invitation email).');
+    }
     if (!$this->isConfigured()) {
       $this->log->warning('UniFi API not configured: missing api_host or token.');
       return UnifiApiResult::failure('UniFi API not configured (missing host or token).');
@@ -392,6 +425,10 @@ class UnifiApiService {
       $res = $this->http->request('PUT', $this->base() . '/users/' . $id, [
         'headers' => $this->headers(),
         'verify' => $this->verify(),
+        // Status ONLY. Never add user_email/email here: this PUT is what
+        // reactivates the records the 2026-09-18 mass-create left behind,
+        // and setting an address on an existing user is the same trigger as
+        // creating one with it.
         'json' => ['status' => $status],
         'timeout' => 20,
       ]);
@@ -440,36 +477,72 @@ class UnifiApiService {
   }
 
   /**
-   * Builds the API payload for creating a user.
+   * Builds the API payload for creating a user — deliberately without email.
    *
-   * The UniFi Access Developer API (local console) expects a 'profile'
-   * object with 'first_name', 'last_name', and 'email'. Flat fields like
-   * 'name' are often rejected or ignored by newer API versions.
+   * Three facts, all measured on the live console (2026-09-17/18):
+   * - the payload is flat (a nested `profile` returned CODE_SYSTEM_ERROR);
+   * - `first_name` + `last_name` alone are sufficient for SUCCESS;
+   * - a record created WITH `user_email` gets UniFi's "Welcome to UniFi
+   *   Identity!" invitation mailed to that address by identity@ui.com. That
+   *   is what members received on 2026-09-18.
+   *
+   * So no address is sent. The member is identified to the console by
+   * `employee_number` = "drupal-{uid}" instead, which reconcile() matches on.
+   * Door access comes from a credential (NFC card / PIN) plus an access
+   * policy, neither of which needs an email; the only thing an email buys is
+   * the UniFi Identity mobile app, and its invitation is exactly what must
+   * not be sent.
+   *
+   * @param string $email
+   *   The member's address. Used only to derive a name when the profile has
+   *   none; it is NOT included in the payload.
+   * @param array $data
+   *   Member data from UnifiSyncManager: first_name, last_name, display_name
+   *   and uid.
    */
   public function userPayloadForData(string $email, array $data = []): array {
     $first = $data['first_name'] ?? '';
     $last = $data['last_name'] ?? '';
 
     if ($first === '' && $last === '') {
-      $parts = explode(' ', $data['display_name'] ?? $email);
+      // The address is a last resort for a name, and only its local part.
+      $fallback = $data['display_name'] ?? '';
+      if ($fallback === '') {
+        $fallback = strstr($email, '@', TRUE) ?: 'Member';
+      }
+      $parts = explode(' ', $fallback);
       $first = array_shift($parts);
       $last = implode(' ', $parts) ?: '.';
     }
 
-    // Flat, NOT nested under a `profile` key, and the email goes in
-    // `user_email` rather than `email`. All three facts were established by
-    // probing the live console on 2026-09-17:
-    // - the old nested shape returned `{"code":"CODE_SYSTEM_ERROR"}`;
-    // - flat with `email` returned `{"code":"CODE_PARAMS_INVALID"}`;
-    // - flat with `user_email` returned `{"code":"SUCCESS"}`.
-    // `email` is read-only on this endpoint — a created user comes back with
-    // `email: ""` and the address in `user_email`. `user_email` is also
-    // unique: a duplicate is refused with `CODE_ADMIN_EMAIL_EXIST`.
-    return [
-      'user_email' => $email,
+    $payload = [
       'first_name' => $first,
       'last_name' => $last,
     ];
+    $uid = (int) ($data['uid'] ?? 0);
+    if ($uid > 0) {
+      $payload['employee_number'] = self::employeeNumberForUid($uid);
+    }
+    return $payload;
+  }
+
+  /**
+   * The employee_number this module gives the console record of a Drupal uid.
+   */
+  public static function employeeNumberForUid(int $uid): string {
+    return self::EMPLOYEE_NUMBER_PREFIX . $uid;
+  }
+
+  /**
+   * The Drupal uid a console employee_number points at, or NULL.
+   */
+  public static function uidFromEmployeeNumber(?string $employee_number): ?int {
+    $employee_number = trim((string) $employee_number);
+    if (!str_starts_with($employee_number, self::EMPLOYEE_NUMBER_PREFIX)) {
+      return NULL;
+    }
+    $rest = substr($employee_number, strlen(self::EMPLOYEE_NUMBER_PREFIX));
+    return ctype_digit($rest) && (int) $rest > 0 ? (int) $rest : NULL;
   }
 
 }

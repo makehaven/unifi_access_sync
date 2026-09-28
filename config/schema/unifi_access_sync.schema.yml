@@ -32,3 +32,6 @@ unifi_access_sync.settings:
     member_role:
       type: string
       label: 'Role a door-badged account must hold to be a current member'
+    reactivate_emailed_records:
+      type: boolean
+      label: 'Reactivate switched-off console records that carry an email address'

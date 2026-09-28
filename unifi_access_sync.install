@@ -140,3 +140,26 @@ function unifi_access_sync_update_9003() {
   }
   return t('member_role was already set to @v; left alone.', ['@v' => $config->get('member_role')]);
 }
+
+/**
+ * Add reactivate_emailed_records, off: hold reactivations of emailed records.
+ *
+ * Creates no longer send an email address to the console (an address is what
+ * makes UniFi mail its "Welcome to UniFi Identity!" invitation, as happened
+ * to members on 2026-09-18). The 368 switched-off records left by that
+ * mass-create already carry one, and whether flipping them back to ACTIVE
+ * re-sends the invitation has not been tested, so they are held until one
+ * record has been tried with `drush unifi:sync-one <email> --execute
+ * --reactivate-emailed`. A missing key reads as FALSE, so a `drush cim` that
+ * strips it is still safe; export it with the site config anyway.
+ */
+function unifi_access_sync_update_9004() {
+  $config = \Drupal::configFactory()->getEditable('unifi_access_sync.settings');
+  if ($config->get('reactivate_emailed_records') === NULL) {
+    $config->set('reactivate_emailed_records', FALSE)->save();
+    return t('Added reactivate_emailed_records = FALSE. Reactivations of console records that carry an email address are held.');
+  }
+  return t('reactivate_emailed_records was already set to @v; left alone.', [
+    '@v' => var_export($config->get('reactivate_emailed_records'), TRUE),
+  ]);
+}

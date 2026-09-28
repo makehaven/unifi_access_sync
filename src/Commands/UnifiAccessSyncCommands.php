@@ -52,6 +52,7 @@ class UnifiAccessSyncCommands extends DrushCommands {
     $o->writeln(sprintf('Valve floor (50%%):  %d active', $s['floor']));
     $o->writeln(sprintf('To create:          %d  (members with no console record)', $s['missing']));
     $o->writeln(sprintf('To reactivate:      %d  (members present but switched off)', $s['reactivate']));
+    $o->writeln(sprintf('Reactivation held:  %d  (switched-off records that carry an email address; reactivate_emailed_records is off)', $s['reactivate_held']));
     $o->writeln(sprintf('Extra (active):     %d  (active in the console, not a current door-badged member)', $s['extra']));
     $o->writeln('');
 
@@ -67,6 +68,34 @@ class UnifiAccessSyncCommands extends DrushCommands {
     elseif ($s['enabled']) {
       $o->writeln(sprintf('Next cron run would queue %d create(s) and %d reactivation(s).', $s['missing'], $s['reactivate']));
     }
+  }
+
+  /**
+   * Plan, or perform, the sync for ONE named member — the pre-flight test.
+   *
+   * Prints exactly what would be sent. Creates never carry an email address
+   * (that is what makes UniFi mail a "Welcome to UniFi Identity!"
+   * invitation). Does not need sync_enabled — see UnifiSyncManager::syncOne()
+   * — but only writes on live, and only with --execute.
+   *
+   * @command unifi:sync-one
+   * @param string $email The member's Drupal account email.
+   * @option execute Perform the one write (default: plan only).
+   * @option reactivate-emailed Reactivate even if the console record carries
+   *   an email address (the test that decides reactivate_emailed_records).
+   * @usage drush unifi:sync-one someone@example.com
+   *   Show what would be sent for this member. Writes nothing.
+   * @usage drush unifi:sync-one someone@example.com --execute
+   *   Create (or reactivate, if the record has no address) this one member.
+   */
+  public function syncOne(string $email, array $options = ['execute' => FALSE, 'reactivate-emailed' => FALSE]): void {
+    $r = $this->mgr->syncOne($email, (bool) $options['execute'], (bool) $options['reactivate-emailed']);
+    $o = $this->output();
+    $o->writeln('Action:   ' . $r['action'] . ($r['detail'] ? '  — ' . $r['detail'] : ''));
+    if ($r['payload'] !== NULL) {
+      $o->writeln('Payload:  ' . json_encode($r['payload'], JSON_UNESCAPED_SLASHES));
+    }
+    $o->writeln('Result:   ' . $r['reason']);
   }
 
   /**

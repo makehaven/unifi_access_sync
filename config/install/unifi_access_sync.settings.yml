@@ -6,3 +6,4 @@ verify_ssl: false
 door_term_id: 0
 allow_delete: false
 member_role: member
+reactivate_emailed_records: false

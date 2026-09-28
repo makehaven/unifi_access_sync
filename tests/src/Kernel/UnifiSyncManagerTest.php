@@ -209,6 +209,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertSame('create', $this->queuedItems[0]['action']);
     $this->assertSame('test@example.com', $this->queuedItems[0]['email']);
     $this->assertSame('Test User', $this->queuedItems[0]['user_data']['display_name']);
+    $this->assertSame((int) $user->id(), $this->queuedItems[0]['user_data']['uid'], 'The uid travels with the create: it becomes the employee_number the record is matched by.');
   }
 
   /**
@@ -927,6 +928,9 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $door_term = $this->doorTerm();
     $this->badgedUser($door_term, 'sleeping@example.com');
     $this->badgedUser($door_term, 'awake@example.com');
+    // These records carry an address; reactivating them is held unless this
+    // is on (see testReactivationOfEmailedRecordIsHeldByDefault()).
+    $this->config('unifi_access_sync.settings')->set('reactivate_emailed_records', TRUE)->save();
 
     UnifiSyncManager::resetCache();
     $this->apiMock->method('listUsers')
@@ -963,6 +967,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ];
     }
 
+    $this->config('unifi_access_sync.settings')->set('reactivate_emailed_records', TRUE)->save();
     UnifiSyncManager::resetCache();
     $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: $present));
 
@@ -1025,9 +1030,158 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertSame(2, $s['present'], 'ACTIVE records only');
     $this->assertSame(2, $s['present_deactivated']);
     $this->assertSame(1, $s['missing'], 'c has no record');
-    $this->assertSame(1, $s['reactivate'], 'b is present but switched off');
+    $this->assertSame(0, $s['reactivate'], 'b carries an address, so it is held, not counted as ready');
+    $this->assertSame(1, $s['reactivate_held'], 'b is present, switched off, and carries an address');
     $this->assertSame(1, $s['extra'], 'x is active and not vouched for; y is already off');
     $this->assertFalse($s['valve_would_block'], '2 active of 3 expected meets the 50% floor');
+  }
+
+  /**
+   * Reactivating a switched-off record that carries an address is held.
+   *
+   * The 368 members switched off since 2026-09-18 all carry the address the
+   * dev mass-create sent. Whether re-activating such a record makes UniFi
+   * send its Identity invitation again is untested, so it waits for a
+   * one-record trial and an explicit reactivate_emailed_records.
+   */
+  public function testReactivationOfEmailedRecordIsHeldByDefault(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'sleeping@example.com');
+    $this->badgedUser($door_term, 'awake@example.com');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u_sleep', 'user_email' => 'sleeping@example.com', 'status' => 'DEACTIVATED'],
+        ['id' => 'u_awake', 'user_email' => 'awake@example.com', 'status' => 'ACTIVE'],
+      ]));
+
+    $this->getSyncManager()->reconcile();
+    $this->assertCount(0, $this->queuedItems);
+  }
+
+  /**
+   * A record created without an address is found by its drupal uid.
+   *
+   * Without this match every member this module creates would look missing
+   * on the next pass and be created again — the 2026-09-15 runaway shape.
+   */
+  public function testReconcileMatchesEmaillessRecordByUid(): void {
+    $door_term = $this->doorTerm();
+    $user = $this->badgedUser($door_term, 'member@example.com');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u1', 'user_email' => '', 'email' => '', 'employee_number' => 'drupal-' . $user->id(), 'status' => 'ACTIVE'],
+      ]));
+    $this->config('unifi_access_sync.settings')->set('allow_delete', TRUE)->save();
+
+    $this->getSyncManager()->reconcile();
+    $this->assertCount(0, $this->queuedItems, 'Neither a re-create nor a revocation.');
+
+    $s = $this->getSyncManager()->status();
+    $this->assertSame(1, $s['present']);
+    $this->assertSame(0, $s['missing']);
+    $this->assertSame(0, $s['extra']);
+  }
+
+  /**
+   * An email-less record switched off is reactivated without any hold.
+   */
+  public function testEmaillessDeactivatedRecordIsReactivated(): void {
+    $door_term = $this->doorTerm();
+    $user = $this->badgedUser($door_term, 'member@example.com');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u1', 'employee_number' => 'drupal-' . $user->id(), 'status' => 'DEACTIVATED'],
+      ]));
+
+    $this->getSyncManager()->reconcile(TRUE);
+    $this->assertCount(1, $this->queuedItems);
+    $this->assertSame('reactivate', $this->queuedItems[0]['action']);
+    $this->assertSame('u1', $this->queuedItems[0]['user_id']);
+  }
+
+  /**
+   * A record indexed under an address AND a uid is counted once.
+   */
+  public function testRecordWithAddressAndUidCountsOnce(): void {
+    $door_term = $this->doorTerm();
+    $user = $this->badgedUser($door_term, 'member@example.com');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u1', 'user_email' => 'member@example.com', 'employee_number' => 'drupal-' . $user->id(), 'status' => 'DEACTIVATED'],
+      ]));
+
+    $s = $this->getSyncManager()->status();
+    $this->assertSame(1, $s['present_deactivated']);
+    $this->assertSame(1, $s['reactivate_held']);
+  }
+
+  /**
+   * The single-member plan shows a payload with no address, and writes nothing.
+   */
+  public function testSyncOnePlanCarriesNoEmailAndWritesNothing(): void {
+    $door_term = $this->doorTerm();
+    $user = $this->badgedUser($door_term, 'new@example.com', ['field_first_name' => 'New', 'field_last_name' => 'Member']);
+
+    $real = new UnifiApiService(
+      new \GuzzleHttp\Client(),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync')
+    );
+    $this->apiMock->method('userPayloadForData')
+      ->willReturnCallback(fn(string $e, array $d) => $real->userPayloadForData($e, $d));
+    $this->apiMock->expects($this->never())->method('createUser');
+    $this->apiMock->expects($this->never())->method('reactivateUser');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: []));
+
+    $r = $this->getSyncManager()->syncOne('New@Example.com');
+    $this->assertSame('create', $r['action']);
+    $this->assertFalse($r['executed']);
+    $this->assertSame([
+      'first_name' => 'New',
+      'last_name' => 'Member',
+      'employee_number' => 'drupal-' . $user->id(),
+    ], $r['payload']);
+  }
+
+  /**
+   * The single-member path holds an emailed reactivation without the flag.
+   */
+  public function testSyncOneHoldsEmailedReactivationWithoutTheFlag(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'sleeping@example.com');
+    $this->apiMock->expects($this->never())->method('reactivateUser');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')
+      ->willReturn(UnifiApiResult::success(data: [
+        ['id' => 'u_sleep', 'user_email' => 'sleeping@example.com', 'status' => 'DEACTIVATED'],
+      ]));
+
+    $r = $this->getSyncManager()->syncOne('sleeping@example.com', TRUE);
+    $this->assertSame('reactivate', $r['action']);
+    $this->assertFalse($r['executed']);
+    $this->assertStringContainsString('held', $r['reason']);
+  }
+
+  /**
+   * The single-member path never acts on someone who is not a current member.
+   */
+  public function testSyncOneRefusesNonMembers(): void {
+    $this->doorTerm();
+    $this->apiMock->expects($this->never())->method('listUsers');
+    $r = $this->getSyncManager()->syncOne('stranger@example.com', TRUE);
+    $this->assertSame('none', $r['action']);
+    $this->assertFalse($r['executed']);
   }
 
 }

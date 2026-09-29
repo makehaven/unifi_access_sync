@@ -214,6 +214,8 @@ class UnifiProvisionerTest extends KernelTestBase {
       new Response(200, [], json_encode(['code' => 'SUCCESS', 'data' => [['nfc_id' => '04ABCDEF123456', 'alias' => 'drupal-7', 'token' => '']]])),
       new Response(200, [], json_encode(['code' => 'SUCCESS', 'msg' => 'success'])),
       new Response(200, [], json_encode(['code' => 'CODE_PARAMS_INVALID', 'msg' => 'nope'])),
+      new Response(200, [], json_encode(['code' => 1, 'codeS' => 'SUCCESS', 'msg' => 'success', 'data' => ['url' => '/avatar/1.png']])),
+      new Response(200, [], json_encode(['code' => 1, 'codeS' => 'CODE_PARAMS_INVALID', 'msg' => 'bad image'])),
     ]));
     $stack->push(Middleware::history($history));
     $api = new UnifiApiService(
@@ -238,6 +240,12 @@ class UnifiProvisionerTest extends KernelTestBase {
     $this->assertFalse($api->setUserPolicies('u-7', ['front-door'])->ok, 'an error envelope inside HTTP 200 is a failure');
     $this->assertFalse($api->setUserPolicies('u-7', [])->ok, 'an empty list would strip every policy');
     $this->assertCount(4, $history, 'the empty policy list never reached the console');
+
+    // The avatar endpoint's envelope: numeric code, word in codeS.
+    $photo = $api->uploadAvatar('u-7', 'png-bytes', 'member-7.png', 'image/png');
+    $this->assertTrue($photo->ok, 'code 1 + codeS SUCCESS is success');
+    $this->assertSame(['url' => '/avatar/1.png'], $photo->data);
+    $this->assertFalse($api->uploadAvatar('u-7', 'png-bytes', 'member-7.png', 'image/png')->ok, 'codeS carrying an error is a failure');
   }
 
 }

@@ -206,7 +206,12 @@ class UnifiApiService {
       return UnifiApiResult::failure($what . ' returned non-JSON', $status, $this->trimForLog($body));
     }
 
-    if (isset($json['code']) && $json['code'] !== self::ENVELOPE_SUCCESS) {
+    // The avatar upload answers in a second dialect, {"code":1,"codeS":
+    // "SUCCESS"} (seen live 2026-09-29), where the numeric code is not an
+    // error. Either field saying SUCCESS is success.
+    $ok = ($json['code'] ?? NULL) === self::ENVELOPE_SUCCESS
+      || ($json['codeS'] ?? NULL) === self::ENVELOPE_SUCCESS;
+    if (isset($json['code']) && !$ok) {
       $msg = (string) ($json['msg'] ?? $json['code']);
       $this->log->error('UniFi @w failed inside HTTP @s: @c @msg', [
         '@w' => $what,

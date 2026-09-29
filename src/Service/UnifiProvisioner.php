@@ -130,7 +130,9 @@ class UnifiProvisioner {
     if (!empty($mine['tried']) && $now - (int) $mine['tried'] < self::RETRY_AFTER) {
       return FALSE;
     }
-    if ($this->cardsEnabled() && empty($raw['nfc_cards']) && $this->cardSerial($uid) !== '') {
+    // Cheap test (no console card listing per member): fewer cards on the
+    // record than serials on file. cardStep() then works out which.
+    if ($this->cardsEnabled() && count((array) ($raw['nfc_cards'] ?? [])) < count($this->cardSerials($uid))) {
       return TRUE;
     }
     if ($this->policyIds() && ($mine['policies'] ?? NULL) !== $this->policyIds()) {
@@ -223,21 +225,47 @@ class UnifiProvisioner {
   }
 
   /**
-   * Card step: import the member's serial if needed, then bind it.
+   * Card step: import each of the member's serials if needed, then bind it.
+   *
+   * field_card_serial_number holds several cards for some members (84 users,
+   * 34 current members on live 2026-09-29), and the one they carry is not
+   * necessarily the first, so every card on file is bound.
    */
   private function cardStep(string $user_id, int $uid, array $raw, bool $execute): array {
     if (!$this->cardsEnabled()) {
       return ['do' => FALSE, 'detail' => 'off (provision_nfc_cards)', 'ok' => NULL];
     }
-    $serial = $this->cardSerial($uid);
-    if ($serial === '') {
+    $serials = $this->cardSerials($uid);
+    if (!$serials) {
       return ['do' => FALSE, 'detail' => 'no card serial on the member record', 'ok' => NULL];
     }
     $index = $this->nfcIndex();
     if ($index === NULL) {
       return ['do' => TRUE, 'detail' => 'could not list console cards', 'ok' => $execute ? FALSE : NULL];
     }
-    $card = $index[$serial] ?? NULL;
+    $details = [];
+    $do = FALSE;
+    $failed = FALSE;
+    $done = FALSE;
+    foreach ($serials as $serial) {
+      $one = $this->oneCard($user_id, $uid, $serial, $execute);
+      $details[] = $one['detail'];
+      $do = $do || $one['do'];
+      $failed = $failed || $one['ok'] === FALSE;
+      $done = $done || $one['ok'] === TRUE;
+    }
+    return [
+      'do' => $do,
+      'detail' => implode('; ', $details),
+      'ok' => $failed ? FALSE : ($done ? TRUE : NULL),
+    ];
+  }
+
+  /**
+   * One serial of the card step.
+   */
+  private function oneCard(string $user_id, int $uid, string $serial, bool $execute): array {
+    $card = $this->nfcIndex[$serial] ?? NULL;
     if ($card && (string) ($card['user_id'] ?? '') === $user_id) {
       return ['do' => FALSE, 'detail' => "card $serial already bound to this record", 'ok' => NULL];
     }
@@ -248,13 +276,14 @@ class UnifiProvisioner {
         'ok' => $execute ? FALSE : NULL,
       ];
     }
-    $plan = $card ? "bind existing card $serial" : "import card $serial as " . UnifiApiService::employeeNumberForUid($uid) . ', then bind';
+    $alias = self::cardAlias($uid, $serial);
+    $plan = $card ? "bind existing card $serial" : "import card $serial as $alias, then bind";
     if (!$execute) {
       return ['do' => TRUE, 'detail' => $plan, 'ok' => NULL];
     }
     $token = (string) ($card['token'] ?? '');
     if ($token === '') {
-      $imported = $this->api->importNfcCard($serial, UnifiApiService::employeeNumberForUid($uid));
+      $imported = $this->api->importNfcCard($serial, $alias);
       if (!$imported->ok) {
         return ['do' => TRUE, 'detail' => $plan . ' — import failed: ' . $imported->describe(), 'ok' => FALSE];
       }
@@ -267,6 +296,16 @@ class UnifiProvisioner {
     }
     $this->nfcIndex[$serial]['user_id'] = $user_id;
     return ['do' => TRUE, 'detail' => $plan, 'ok' => TRUE];
+  }
+
+  /**
+   * The console alias for an imported card: unique per card, names the member.
+   *
+   * Aliases must be unique, so a plain "drupal-{uid}" would clash with a
+   * member's second card or a replacement card.
+   */
+  public static function cardAlias(int $uid, string $serial): string {
+    return UnifiApiService::employeeNumberForUid($uid) . '-' . $serial;
   }
 
   /**
@@ -333,26 +372,51 @@ class UnifiProvisioner {
   }
 
   /**
-   * The member's card serial, uppercase hex, or '' when they have none.
-   *
-   * Same resolution as the access box export (FallbackStoreBuilder): the
-   * user field first, then the main profile.
+   * The member's first card serial, uppercase hex, or '' when they have none.
    */
   public function cardSerial(int $uid): string {
+    return $this->cardSerials($uid)[0] ?? '';
+  }
+
+  /**
+   * Every card serial on file for the member, uppercase hex, in field order.
+   *
+   * The user field (all values) first; the main profile only when the user
+   * field holds none — the access box export's resolution, but not stopping
+   * at the first value. Values that could not come from a reader (not 4-10
+   * bytes of hex) are dropped.
+   */
+  public function cardSerials(int $uid): array {
+    $values = [];
     $user = $this->etm->getStorage('user')->load($uid);
-    $value = '';
-    if ($user && $user->hasField('field_card_serial_number') && !$user->get('field_card_serial_number')->isEmpty()) {
-      $value = (string) $user->get('field_card_serial_number')->value;
-    }
-    if (trim($value) === '' && ($profile = $this->mainProfile($uid))) {
-      if ($profile->hasField('field_card_serial_number') && !$profile->get('field_card_serial_number')->isEmpty()) {
-        $value = (string) $profile->get('field_card_serial_number')->value;
+    if ($user && $user->hasField('field_card_serial_number')) {
+      foreach ($user->get('field_card_serial_number') as $item) {
+        $values[] = (string) $item->value;
       }
     }
-    $value = strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', $value) ?? '');
-    // A serial the reader could produce is 4-10 bytes of hex; anything else is
-    // a typo and would be refused by the import anyway.
-    return (strlen($value) >= 8 && strlen($value) <= 20 && strlen($value) % 2 === 0) ? $value : '';
+    $serials = self::normalizeSerials($values);
+    if (!$serials && ($profile = $this->mainProfile($uid)) && $profile->hasField('field_card_serial_number')) {
+      $values = [];
+      foreach ($profile->get('field_card_serial_number') as $item) {
+        $values[] = (string) $item->value;
+      }
+      $serials = self::normalizeSerials($values);
+    }
+    return $serials;
+  }
+
+  /**
+   * Uppercase, strip separators, drop impossible values and duplicates.
+   */
+  public static function normalizeSerials(array $values): array {
+    $out = [];
+    foreach ($values as $value) {
+      $value = strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', (string) $value) ?? '');
+      if (strlen($value) >= 8 && strlen($value) <= 20 && strlen($value) % 2 === 0) {
+        $out[$value] = $value;
+      }
+    }
+    return array_values($out);
   }
 
   /**

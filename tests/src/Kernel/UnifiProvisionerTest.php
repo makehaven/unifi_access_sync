@@ -43,7 +43,7 @@ class UnifiProvisionerTest extends KernelTestBase {
   /**
    * A provisioner whose member lookups are fixed (no user/profile fields).
    */
-  private function provisioner(string $serial = '04ABCDEF123456', ?array $photo = NULL): UnifiProvisioner {
+  private function provisioner(string|array $serial = '04ABCDEF123456', ?array $photo = NULL): UnifiProvisioner {
     $p = $this->getMockBuilder(UnifiProvisioner::class)
       ->setConstructorArgs([
         $this->container->get('entity_type.manager'),
@@ -52,9 +52,9 @@ class UnifiProvisionerTest extends KernelTestBase {
         $this->api,
         $this->container->get('state'),
       ])
-      ->onlyMethods(['cardSerial', 'photoFile'])
+      ->onlyMethods(['cardSerials', 'photoFile'])
       ->getMock();
-    $p->method('cardSerial')->willReturn($serial);
+    $p->method('cardSerials')->willReturn(is_array($serial) ? $serial : ($serial === '' ? [] : [$serial]));
     $p->method('photoFile')->willReturn($photo);
     return $p;
   }
@@ -82,7 +82,7 @@ class UnifiProvisionerTest extends KernelTestBase {
     $this->settings(['provision_nfc_cards' => TRUE]);
     $this->api->method('listNfcCards')->willReturn(UnifiApiResult::success([]));
     $this->api->expects($this->once())->method('importNfcCard')
-      ->with('04ABCDEF123456', 'drupal-7')
+      ->with('04ABCDEF123456', 'drupal-7-04ABCDEF123456')
       ->willReturn(UnifiApiResult::success('tok-1'));
     $this->api->expects($this->once())->method('assignNfcCard')
       ->with('u-7', 'tok-1')
@@ -192,6 +192,35 @@ class UnifiProvisionerTest extends KernelTestBase {
         $this->assertStringContainsString('email address', $step['detail']);
       }
     }
+  }
+
+  /**
+   * Chris Chalsma, 2026-09-29: two cards on file, he carries the second.
+   */
+  public function testEveryCardOnFileIsBound(): void {
+    $this->settings(['provision_nfc_cards' => TRUE]);
+    $this->api->method('listNfcCards')->willReturn(UnifiApiResult::success([
+      ['nfc_id' => '043B943AD86D80', 'token' => 'tok-old', 'user_id' => 'u-7'],
+    ]));
+    $this->api->expects($this->once())->method('importNfcCard')
+      ->with('0496889A215980', 'drupal-7-0496889A215980')
+      ->willReturn(UnifiApiResult::success('tok-new'));
+    $this->api->expects($this->once())->method('assignNfcCard')
+      ->with('u-7', 'tok-new')
+      ->willReturn(UnifiApiResult::success(NULL));
+    $p = $this->provisioner(['043B943AD86D80', '0496889A215980']);
+    $this->assertTrue($p->needsWork(['nfc_cards' => [['id' => '100004']]], 7), 'one card bound, two on file');
+    $steps = $p->provision('u-7', 7, ['nfc_cards' => [['id' => '100004']]], TRUE);
+    $this->assertTrue($steps['card']['ok']);
+    $this->assertStringContainsString('043B943AD86D80 already bound', $steps['card']['detail']);
+    $this->assertStringContainsString('import card 0496889A215980', $steps['card']['detail']);
+  }
+
+  public function testSerialsAreNormalized(): void {
+    $this->assertSame(
+      ['043B943AD86D80', '0496889A215980'],
+      UnifiProvisioner::normalizeSerials(['043b943ad86d80', ' 04:96:88:9A:21:59:80 ', '043B943AD86D80', 'nope', '']),
+    );
   }
 
   public function testNeedsWorkIgnoresRecordsThatHaveACard(): void {

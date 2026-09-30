@@ -52,7 +52,7 @@ class UnifiAccessSyncCommands extends DrushCommands {
     $o->writeln(sprintf('Valve floor (50%%):  %d active', $s['floor']));
     $o->writeln(sprintf('To create:          %d  (members with no console record)', $s['missing']));
     $o->writeln(sprintf('To reactivate:      %d  (members present but switched off)', $s['reactivate']));
-    $o->writeln(sprintf('Reactivation held:  %d  (switched-off records that carry an email address; reactivate_emailed_records is off)', $s['reactivate_held']));
+    $o->writeln(sprintf('Reactivation held:  %d  (switched-off records that carry an email address; reactivate_emailed_records is off — on clears each address first)', $s['reactivate_held']));
     $o->writeln(sprintf('Extra (active):     %d  (active in the console, not a current door-badged member)', $s['extra']));
     $o->writeln(sprintf('To provision:       %s', $s['provisioning_enabled']
       ? $s['provision'] . '  (active members missing card / door policy / photo, not tried in the last day)'
@@ -84,15 +84,17 @@ class UnifiAccessSyncCommands extends DrushCommands {
    * @command unifi:sync-one
    * @param string $email The member's Drupal account email.
    * @option execute Perform the one write (default: plan only).
-   * @option reactivate-emailed Reactivate even if the console record carries
-   *   an email address (the test that decides reactivate_emailed_records).
+   * @option clear-email If the console record carries an email address,
+   *   clear it, re-read the record, and only then reactivate / provision.
+   *   Records that keep an address (UniFi OS admins, SSO logins) are left alone.
+   * @option reactivate-emailed Old name for --clear-email.
    * @usage drush unifi:sync-one someone@example.com
    *   Show what would be sent for this member. Writes nothing.
    * @usage drush unifi:sync-one someone@example.com --execute
    *   Create (or reactivate, if the record has no address) this one member.
    */
-  public function syncOne(string $email, array $options = ['execute' => FALSE, 'reactivate-emailed' => FALSE]): void {
-    $r = $this->mgr->syncOne($email, (bool) $options['execute'], (bool) $options['reactivate-emailed']);
+  public function syncOne(string $email, array $options = ['execute' => FALSE, 'clear-email' => FALSE, 'reactivate-emailed' => FALSE]): void {
+    $r = $this->mgr->syncOne($email, (bool) $options['execute'], (bool) $options['clear-email'] || (bool) $options['reactivate-emailed']);
     $o = $this->output();
     $o->writeln('Action:   ' . $r['action'] . ($r['detail'] ? '  — ' . $r['detail'] : ''));
     if ($r['payload'] !== NULL) {

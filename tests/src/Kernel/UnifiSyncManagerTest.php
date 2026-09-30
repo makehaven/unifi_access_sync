@@ -948,6 +948,8 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertSame('reactivate', $this->queuedItems[0]['action']);
     $this->assertSame('sleeping@example.com', $this->queuedItems[0]['email']);
     $this->assertSame('u_sleep', $this->queuedItems[0]['user_id']);
+    $this->assertTrue($this->queuedItems[0]['clear_email'], 'the record carries an address, so the worker clears it first');
+    $this->assertGreaterThan(0, $this->queuedItems[0]['uid']);
   }
 
   /**
@@ -1228,6 +1230,109 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $r = $this->getSyncManager()->syncOne('stranger@example.com', TRUE);
     $this->assertSame('none', $r['action']);
     $this->assertFalse($r['executed']);
+  }
+
+  /**
+   * --clear-email: clear, re-read, and only then reactivate and provision.
+   *
+   * Brenda Brown, 2026-09-29: a switched-off 09-18 record carrying her
+   * address; done by hand, then granted at the intercom.
+   */
+  public function testSyncOneClearsTheEmailBeforeReactivating(): void {
+    $door_term = $this->doorTerm();
+    $user = $this->badgedUser($door_term, 'sleeping@example.com');
+    $calls = [];
+    $this->apiMock->method('clearUserEmail')->willReturnCallback(function (string $id, int $uid) use (&$calls, $user) {
+      $calls[] = 'clear';
+      $this->assertSame('u_sleep', $id);
+      $this->assertSame((int) $user->id(), $uid);
+      return UnifiApiResult::success(NULL);
+    });
+    $this->apiMock->method('getUser')->willReturnCallback(function () use (&$calls) {
+      $calls[] = 'reread';
+      return UnifiApiResult::success(['id' => 'u_sleep', 'user_email' => '', 'email' => '', 'status' => 'DEACTIVATED']);
+    });
+    $this->apiMock->method('reactivateUser')->willReturnCallback(function () use (&$calls) {
+      $calls[] = 'reactivate';
+      return UnifiApiResult::success(NULL);
+    });
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: [
+      ['id' => 'u_sleep', 'user_email' => 'sleeping@example.com', 'status' => 'DEACTIVATED'],
+    ]));
+
+    $plan = $this->getSyncManager()->syncOne('sleeping@example.com', FALSE, TRUE);
+    $this->assertSame('reactivate', $plan['action']);
+    $this->assertStringContainsString('clear the address', $plan['detail']);
+    $this->assertSame([], $calls, 'a plan writes nothing');
+
+    $r = $this->getSyncManager()->syncOne('sleeping@example.com', TRUE, TRUE);
+    $this->assertTrue($r['ok']);
+    $this->assertSame(['clear', 'reread', 'reactivate'], $calls);
+  }
+
+  /**
+   * A record that keeps its address after the clear is never reactivated.
+   *
+   * UniFi OS admins and SSO logins keep `email` (JR, Ashley; Chris Chalsma
+   * until he was made Basic).
+   */
+  public function testARecordThatKeepsItsEmailIsNeverReactivated(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'admin@example.com');
+    $this->apiMock->method('clearUserEmail')->willReturn(UnifiApiResult::success(NULL));
+    $this->apiMock->method('getUser')->willReturn(UnifiApiResult::success(['id' => 'u_adm', 'user_email' => '', 'email' => 'admin@example.com']));
+    $this->apiMock->expects($this->never())->method('reactivateUser');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: [
+      ['id' => 'u_adm', 'user_email' => 'admin@example.com', 'email' => 'admin@example.com', 'status' => 'DEACTIVATED'],
+    ]));
+
+    $r = $this->getSyncManager()->syncOne('admin@example.com', TRUE, TRUE);
+    $this->assertFalse($r['ok']);
+    $this->assertStringContainsString('still carries an email address', $r['reason']);
+  }
+
+  /**
+   * The queue worker's path: no reactivation when the re-read fails.
+   */
+  public function testQueuedClearAndReactivateStopsWhenTheRereadFails(): void {
+    $this->apiMock->method('clearUserEmail')->willReturn(UnifiApiResult::success(NULL));
+    $this->apiMock->method('getUser')->willReturn(UnifiApiResult::failure('timeout'));
+    $this->apiMock->expects($this->never())->method('reactivateUser');
+    $this->assertFalse($this->getSyncManager()->clearEmailAndReactivate([
+      'action' => 'reactivate',
+      'email' => 'a@example.com',
+      'user_id' => 'u_1',
+      'clear_email' => TRUE,
+      'uid' => 5,
+    ]));
+  }
+
+  /**
+   * An active record with an address is cleared, then provisioned, on request.
+   */
+  public function testSyncOneClearsAnActiveRecordOnRequest(): void {
+    $door_term = $this->doorTerm();
+    $this->badgedUser($door_term, 'active@example.com');
+    $this->apiMock->expects($this->once())->method('clearUserEmail')->willReturn(UnifiApiResult::success(NULL));
+    $this->apiMock->method('getUser')->willReturn(UnifiApiResult::success(['id' => 'u_act', 'user_email' => '', 'email' => '']));
+    $this->apiMock->expects($this->never())->method('reactivateUser');
+
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: [
+      ['id' => 'u_act', 'user_email' => 'active@example.com', 'status' => 'ACTIVE'],
+    ]));
+
+    $without = $this->getSyncManager()->syncOne('active@example.com', TRUE);
+    $this->assertSame('none', $without['action']);
+    $this->assertStringContainsString('--clear-email', $without['reason']);
+
+    $r = $this->getSyncManager()->syncOne('active@example.com', TRUE, TRUE);
+    $this->assertSame('clear-email', $r['action']);
+    $this->assertTrue($r['ok']);
   }
 
 }

@@ -222,11 +222,7 @@ class UnifiSyncManager {
           continue;
         }
         $this->log->notice('Queueing UniFi reactivation for @e', ['@e' => $email]);
-        $queue->createItem([
-          'action' => 'reactivate',
-          'email' => $email,
-          'user_id' => $record['id'],
-        ]);
+        $queue->createItem(self::reactivateItem($email, $record, $data));
       }
     }
     if ($provisioning) {
@@ -235,7 +231,7 @@ class UnifiSyncManager {
     if ($held) {
       // One line per run, not one per member: this is a standing decision,
       // and 368 notices an hour would bury everything else.
-      $this->log->notice('Held @n UniFi reactivation(s): those console records carry an email address, and reactivate_emailed_records is off. See UnifiSyncManager::reactivationHeld().', ['@n' => $held]);
+      $this->log->notice('Held @n UniFi reactivation(s): those console records carry an email address, and reactivate_emailed_records is off (on = clear each address first, then reactivate). See UnifiSyncManager::reactivationHeld().', ['@n' => $held]);
     }
     $vouched = $this->vouchedKeys($should);
     foreach ($this->uniqueRecords($have) as $user) {
@@ -299,11 +295,7 @@ class UnifiSyncManager {
         return;
       }
       $this->log->notice('Queueing single UniFi reactivation for @e', ['@e' => $email]);
-      $queue->createItem([
-        'action' => 'reactivate',
-        'email' => $email,
-        'user_id' => $record['id'],
-      ]);
+      $queue->createItem(self::reactivateItem($email, $record, $user_data));
     }
     elseif (!$should_have && $exists && !empty($record['id']) && $this->isActiveRecord($record)) {
       if (!$this->deletesAllowed()) {
@@ -339,15 +331,18 @@ class UnifiSyncManager {
    *   The member's Drupal account email.
    * @param bool $execute
    *   FALSE (default) plans only; TRUE performs the one write.
-   * @param bool $reactivate_emailed
-   *   TRUE to reactivate even a record that carries an email address — the
-   *   one-record test that decides reactivate_emailed_records.
+   * @param bool $clear_email
+   *   TRUE to clear the address from a record that carries one (then re-read
+   *   it and go on only if no address is left) — reactivating it if it is
+   *   switched off, provisioning it if it is active. The one-record form of
+   *   reactivate_emailed_records. A record is NEVER reactivated or
+   *   provisioned while it still carries an address.
    *
    * @return array
    *   Keys: action (create|reactivate|none), reason, payload, executed, ok,
    *   detail.
    */
-  public function syncOne(string $email, bool $execute = FALSE, bool $reactivate_emailed = FALSE): array {
+  public function syncOne(string $email, bool $execute = FALSE, bool $clear_email = FALSE): array {
     $out = [
       'action' => 'none',
       'reason' => '',
@@ -380,21 +375,40 @@ class UnifiSyncManager {
       $out['action'] = 'reactivate';
       $out['payload'] = ['status' => UnifiApiService::STATUS_ACTIVE];
       $out['detail'] = 'console record ' . $record['id'] . ($record['has_email'] ? ' (carries an email address)' : ' (no email address)');
-      if ($this->reactivationHeld($record) && !$reactivate_emailed) {
-        $out['reason'] = 'held: this record carries an email address; pass --reactivate-emailed to test it on this one member';
+      if ($this->reactivationHeld($record) && !$clear_email) {
+        $out['reason'] = 'held: this record carries an email address; pass --clear-email to clear it, then reactivate';
         return $out;
+      }
+      if (!empty($record['has_email'])) {
+        $out['clear_email'] = TRUE;
+        $out['detail'] .= ' — clear the address, re-read, then reactivate';
       }
     }
     else {
       $out['reason'] = 'already ACTIVE in the console (record ' . ($record['id'] ?? '?') . ')';
+      if (!empty($record['has_email']) && !empty($record['id'])) {
+        if ($clear_email) {
+          $out['action'] = 'clear-email';
+          $out['clear_email'] = TRUE;
+          $out['detail'] = 'console record ' . $record['id'] . ' carries an email address — clear it, re-read, then provision';
+        }
+        else {
+          $out['reason'] .= '; it carries an email address, so nothing is provisioned (--clear-email to clear it first)';
+        }
+      }
     }
 
     if (!$execute) {
       if ($out['action'] !== 'none') {
         $out['reason'] = 'plan only; pass --execute to perform this one write';
       }
-      if ($record !== NULL && $this->isActiveRecord($record) && !empty($record['id'])) {
-        $out['provision'] = $this->provisionPlan((string) $record['id'], $data, (array) ($record['raw'] ?? []), FALSE);
+      if ($record !== NULL && !empty($record['id']) && ($this->isActiveRecord($record) || !empty($out['clear_email']))) {
+        $plan_raw = (array) ($record['raw'] ?? []);
+        if (!empty($out['clear_email'])) {
+          // Planned as it will be once the address is gone.
+          $plan_raw = array_diff_key($plan_raw, ['user_email' => 1, 'email' => 1, 'has_email' => 1, 'profile' => 1]);
+        }
+        $out['provision'] = $this->provisionPlan((string) $record['id'], $data, $plan_raw, FALSE);
       }
       return $out;
     }
@@ -405,7 +419,21 @@ class UnifiSyncManager {
 
     $user_id = (string) ($record['id'] ?? '');
     $raw = (array) ($record['raw'] ?? []);
-    if ($out['action'] !== 'none') {
+    if (!empty($out['clear_email'])) {
+      $cleared = $this->clearEmail($user_id, (int) ($data['uid'] ?? 0));
+      $out['executed'] = TRUE;
+      if (!$cleared->ok) {
+        $out['ok'] = FALSE;
+        $out['reason'] = 'FAILED: ' . $cleared->describe();
+        return $out;
+      }
+      $raw = (array) $cleared->data;
+      if ($out['action'] === 'clear-email') {
+        $out['ok'] = TRUE;
+        $out['reason'] = 'done';
+      }
+    }
+    if ($out['action'] === 'create' || $out['action'] === 'reactivate') {
       $result = $out['action'] === 'create'
         ? $this->api->createUser($out['payload'])
         : $this->api->reactivateUser((string) $record['id']);
@@ -462,6 +490,77 @@ class UnifiSyncManager {
       return [];
     }
     return $this->provisioner->provision((string) $item['user_id'], (int) $item['uid'], (array) ($item['raw'] ?? []), TRUE);
+  }
+
+  /**
+   * Clears a console record's address, then proves it is gone.
+   *
+   * PUT user_email "" (+ the drupal-{uid} tag), then GET the record again:
+   * success only when neither `user_email` nor `email` holds an address.
+   * `email` stays set on UniFi OS admins and SSO logins (JR, Ashley, and
+   * Chris Chalsma until he was made Basic, 2026-09-29); those fail here and
+   * are left alone, because granting such a record anything is exactly what
+   * could make UniFi send its invitation. On success ->data is the fresh row.
+   */
+  public function clearEmail(string $user_id, int $uid): UnifiApiResult {
+    if ($user_id === '' || $uid <= 0) {
+      return UnifiApiResult::failure('clearEmail needs the console id and the member uid.');
+    }
+    $put = $this->api->clearUserEmail($user_id, $uid);
+    self::resetCache();
+    if (!$put->ok) {
+      $this->log->error('UniFi: clearing the email on @id (uid @u) failed: @r', ['@id' => $user_id, '@u' => $uid, '@r' => $put->describe()]);
+      return $put;
+    }
+    $again = $this->api->getUser($user_id);
+    if (!$again->ok || !is_array($again->data)) {
+      $this->log->error('UniFi: cleared the email on @id (uid @u) but could not re-read it; not reactivating: @r', ['@id' => $user_id, '@u' => $uid, '@r' => $again->describe()]);
+      return UnifiApiResult::failure('could not re-read the record after clearing its email: ' . $again->describe());
+    }
+    if (UnifiProvisioner::carriesEmail($again->data)) {
+      $this->log->warning('UniFi: @id (uid @u) still carries an email address after clearing — a UniFi OS admin or SSO login. Left alone; change it in the console (Account Type: Basic) if it should be a plain door user.', ['@id' => $user_id, '@u' => $uid]);
+      return UnifiApiResult::failure('the record still carries an email address after clearing (a UniFi OS admin or SSO login?); left alone — make it Basic in the console, or leave it');
+    }
+    $this->log->notice('UniFi: cleared the email on @id (uid @u); verified none left.', ['@id' => $user_id, '@u' => $uid]);
+    return UnifiApiResult::success($again->data, $again->statusCode);
+  }
+
+  /**
+   * Queue worker: clear the address, then reactivate — never one without the other.
+   *
+   * @return bool
+   *   TRUE when the record ended up ACTIVE with no address.
+   */
+  public function clearEmailAndReactivate(array $item): bool {
+    $user_id = (string) ($item['user_id'] ?? '');
+    $cleared = $this->clearEmail($user_id, (int) ($item['uid'] ?? 0));
+    if (!$cleared->ok) {
+      return FALSE;
+    }
+    $result = $this->api->reactivateUser($user_id);
+    self::resetCache();
+    if (!$result->ok) {
+      $this->log->error('UniFi: cleared the email on @id but reactivating it failed: @r', ['@id' => $user_id, '@r' => $result->describe()]);
+      return FALSE;
+    }
+    $this->log->notice('UniFi access for @e (ID: @id) restored via queue, after clearing its email.', ['@e' => $item['email'] ?? '', '@id' => $user_id]);
+    return TRUE;
+  }
+
+  /**
+   * A reactivate queue item; a record with an address is cleared first.
+   */
+  private static function reactivateItem(string $email, array $record, array $data): array {
+    $item = [
+      'action' => 'reactivate',
+      'email' => $email,
+      'user_id' => $record['id'],
+    ];
+    if (!empty($record['has_email'])) {
+      $item['clear_email'] = TRUE;
+      $item['uid'] = (int) ($data['uid'] ?? 0);
+    }
+    return $item;
   }
 
   /**
@@ -771,16 +870,15 @@ class UnifiSyncManager {
   /**
    * Whether reactivating this record is being held back.
    *
-   * Reactivation sends `{"status":"ACTIVE"}` and nothing else, so it cannot
-   * *give* a record an address. But the 368 current members switched off
-   * since 2026-09-18 already carry one (the dev mass-create sent
-   * `user_email`), and it has not been shown that flipping such a record back
-   * to ACTIVE does not make UniFi (re)send its Identity invitation — those
-   * invitations expired after 7 days. Until one record has been reactivated
-   * and watched (`drush unifi:sync-one <email> --execute
-   * --reactivate-emailed`), these are held. `reactivate_emailed_records`
-   * TRUE releases them. Records this module creates carry no address and are
-   * never held.
+   * The current members switched off since 2026-09-18 carry an address (the
+   * dev mass-create sent `user_email`), and an address is what lets UniFi
+   * mail its Identity invitation. Such a record is never reactivated as it
+   * is: with `reactivate_emailed_records` on, its address is cleared and the
+   * record re-read first (clearEmail()), and it is reactivated only if no
+   * address is left. Off (the default), they are held. Proven on one member
+   * 2026-09-29 (Brenda Brown: cleared, reactivated, card + door + photo,
+   * granted at the intercom). Records this module creates carry no address
+   * and are never held.
    */
   public function reactivationHeld(array $record): bool {
     return !empty($record['has_email']) && !$this->cfg->get('reactivate_emailed_records');

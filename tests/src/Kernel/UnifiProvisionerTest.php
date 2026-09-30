@@ -277,4 +277,30 @@ class UnifiProvisionerTest extends KernelTestBase {
     $this->assertFalse($api->uploadAvatar('u-7', 'png-bytes', 'member-7.png', 'image/png')->ok, 'codeS carrying an error is a failure');
   }
 
+  /**
+   * The clear sends an empty user_email and the tag, nothing else.
+   */
+  public function testClearUserEmailRequestShape(): void {
+    $this->config('unifi_access_sync.settings')
+      ->set('api_host', 'https://unifi.example.com')
+      ->set('api_token', 't')
+      ->save();
+    $history = [];
+    $stack = HandlerStack::create(new MockHandler([
+      new Response(200, [], json_encode(['code' => 'SUCCESS', 'data' => NULL])),
+    ]));
+    $stack->push(Middleware::history($history));
+    $api = new UnifiApiService(
+      new Client(['handler' => $stack]),
+      $this->container->get('config.factory'),
+      $this->container->get('logger.channel.unifi_access_sync'),
+    );
+    $this->assertTrue($api->clearUserEmail('u-7', 7)->ok);
+    $this->assertSame('PUT', $history[0]['request']->getMethod());
+    $this->assertStringEndsWith('/users/u-7', (string) $history[0]['request']->getUri()->getPath());
+    $this->assertSame(['user_email' => '', 'employee_number' => 'drupal-7'], json_decode((string) $history[0]['request']->getBody(), TRUE));
+    $this->assertFalse($api->clearUserEmail('u-7', 0)->ok, 'no uid, no tag, no write');
+    $this->assertCount(1, $history);
+  }
+
 }

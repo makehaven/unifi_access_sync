@@ -157,6 +157,12 @@ class UnifiAccessSyncWorker extends QueueWorkerBase implements ContainerFactoryP
             $this->logger->error('Cannot restore UniFi access for @e: Missing user ID.', ['@e' => $email]);
             break;
           }
+          if (!empty($data['clear_email'])) {
+            // The record carries an address: clear it and prove it is gone
+            // before reactivating. The manager logs every outcome.
+            $this->manager->clearEmailAndReactivate($data);
+            break;
+          }
           $result = $this->api->reactivateUser($user_id);
           if ($result->ok) {
             $this->logger->notice('UniFi access for @e (ID: @id) restored via queue.', [

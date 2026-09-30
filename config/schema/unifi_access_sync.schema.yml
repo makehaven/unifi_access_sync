@@ -34,7 +34,7 @@ unifi_access_sync.settings:
       label: 'Role a door-badged account must hold to be a current member'
     reactivate_emailed_records:
       type: boolean
-      label: 'Reactivate switched-off console records that carry an email address'
+      label: 'Clear the email from switched-off console records, verify, then reactivate them'
     provision_nfc_cards:
       type: boolean
       label: 'Import each member card serial and bind it to their console record'

@@ -160,15 +160,23 @@ So:
 - The queue worker drops a `create` item with no `uid` (it could never be
   matched again → hourly re-create).
 - **Reactivation** is `PUT {"status":"ACTIVE"}` only, so it cannot add an
-  address. But the ~368 switched-off current members already carry the
-  address from 09-18, and whether re-activating one re-sends the invitation is
-  **untested**. They are held (`reactivate_emailed_records`, default FALSE,
-  update 9004) and reported by `unifi:status` as "Reactivation held".
+  address. The ~367 switched-off current members already carry the address
+  from 09-18, so a record is **never reactivated or provisioned while it
+  carries an address**. `reactivate_emailed_records` (default FALSE, update
+  9004) off = held ("Reactivation held" in `unifi:status`); on = clear the
+  address first (`clearUserEmail()`: `user_email ""` + `drupal-{uid}` tag), re-read
+  the record, and reactivate only if neither `user_email` nor `email` is left
+  (`UnifiSyncManager::clearEmail()`). UniFi OS admins and SSO logins keep
+  `email` after the clear, so they fail that check and are left alone (make
+  them Basic in the console first). Proven by hand on Brenda Brown 2026-09-29.
 - `drush unifi:sync-one <email>` plans (and with `--execute` performs) the
   sync for one current member, printing the exact payload. It does not need
   `sync_enabled` (flipping that to test one record would open cron and the
-  badge hooks) but does need live. `--reactivate-emailed` is the one-record
-  trial that decides `reactivate_emailed_records`.
+  badge hooks) but does need live. `--clear-email` (old name
+  `--reactivate-emailed`) runs the clear-then-verify step for that member,
+  on a switched-off or an active record.
+- `field_card_serial_number` is multi-value; provisioning binds **every**
+  card on file (a member may carry the second one — Chris Chalsma 09-29).
 
 ## Two independent controls — do not conflate them
 

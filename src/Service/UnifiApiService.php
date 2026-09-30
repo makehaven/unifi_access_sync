@@ -402,6 +402,32 @@ class UnifiApiService {
    * just has to be switched back on. Verified against the live console on
    * 2026-09-21 (see the release record).
    */
+  /**
+   * One console user row, as listUsers returns it.
+   */
+  public function getUser(string $id): UnifiApiResult {
+    return $this->call('GET', '/users/' . rawurlencode($id), [], 'getUser');
+  }
+
+  /**
+   * Removes the address from a console user and tags it drupal-{uid}.
+   *
+   * The only write that touches user_email, and it can only empty it: an
+   * address on a record is what lets UniFi mail its Identity invitation (the
+   * 2026-09-18 incident). The tag is how the record is found once it has no
+   * address. This clears `user_email` only; `email` also empties unless the
+   * record is a UniFi OS admin or SSO login, which the caller must check by
+   * re-reading (UnifiSyncManager::clearEmail()).
+   */
+  public function clearUserEmail(string $id, int $uid): UnifiApiResult {
+    if ($uid <= 0) {
+      return UnifiApiResult::failure('Refused: clearing an email needs the member uid for the drupal-{uid} tag.');
+    }
+    return $this->call('PUT', '/users/' . rawurlencode($id), [
+      'json' => ['user_email' => '', 'employee_number' => self::employeeNumberForUid($uid)],
+    ], 'clearUserEmail');
+  }
+
   public function reactivateUser(string $id): UnifiApiResult {
     return $this->setUserStatus($id, self::STATUS_ACTIVE, 'reactivateUser');
   }

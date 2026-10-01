@@ -852,10 +852,17 @@ class UnifiSyncManager {
    * without one. The uid match also survives a member changing their email.
    */
   private function findRecord(array $have, string $email_key, array $data): ?array {
+    $uid = (int) ($data['uid'] ?? 0);
+    // An ACTIVE record tagged for this member wins over an address match:
+    // members can have an old, switched-off duplicate that still carries
+    // their address (2026-09-30: JR's 'John Logan' record), and acting on
+    // that one fails (the tag already exists) every hour.
+    if ($uid > 0 && isset($have[self::uidKey($uid)]) && $this->isActiveRecord($have[self::uidKey($uid)])) {
+      return $have[self::uidKey($uid)];
+    }
     if (isset($have[$email_key])) {
       return $have[$email_key];
     }
-    $uid = (int) ($data['uid'] ?? 0);
     if ($uid > 0 && isset($have[self::uidKey($uid)])) {
       return $have[self::uidKey($uid)];
     }

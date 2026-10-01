@@ -1352,4 +1352,23 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->assertSame([], $this->queuedItems);
   }
 
+  /**
+   * An active tagged record wins over a switched-off duplicate with the address.
+   */
+  public function testActiveTaggedRecordBeatsStaleEmailDuplicate(): void {
+    $door_term = $this->doorTerm();
+    $user = $this->badgedUser($door_term, 'dup@example.com');
+    $this->config('unifi_access_sync.settings')->set('reactivate_emailed_records', TRUE)->save();
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: [
+      ['id' => 'u_old', 'user_email' => 'dup@example.com', 'status' => 'DEACTIVATED'],
+      ['id' => 'u_new', 'employee_number' => 'drupal-' . $user->id(), 'status' => 'ACTIVE'],
+    ]));
+    $this->apiMock->expects($this->never())->method('clearUserEmail');
+    $this->apiMock->expects($this->never())->method('reactivateUser');
+    $r = $this->getSyncManager()->syncOne('dup@example.com', TRUE, TRUE);
+    $this->assertSame('none', $r['action']);
+    $this->assertStringContainsString('u_new', $r['reason']);
+  }
+
 }

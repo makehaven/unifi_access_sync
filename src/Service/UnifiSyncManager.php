@@ -234,11 +234,18 @@ class UnifiSyncManager {
       $this->log->notice('Held @n UniFi reactivation(s): those console records carry an email address, and reactivate_emailed_records is off (on = clear each address first, then reactivate). See UnifiSyncManager::reactivationHeld().', ['@n' => $held]);
     }
     $vouched = $this->vouchedKeys($should);
+    $unmanaged = 0;
     foreach ($this->uniqueRecords($have) as $user) {
       $email = $this->labelFor($user);
       // A record that is already DEACTIVATED holds no access; there is
       // nothing to revoke and nothing worth a log line every hour.
       if (!array_intersect_key(array_flip($user['keys']), $vouched) && !empty($user['id']) && $this->isActiveRecord($user)) {
+        // Only revoke what this module manages. Staff, system, robotics and
+        // other hand-made console accounts carry no drupal-{uid} tag.
+        if (!self::isManagedRecord($user)) {
+          $unmanaged++;
+          continue;
+        }
         if (!$this->deletesAllowed()) {
           $this->log->notice('Would revoke UniFi access for @e (not door-badged in Drupal) — revocation is disabled (allow_delete).', ['@e' => $email]);
           continue;
@@ -250,6 +257,9 @@ class UnifiSyncManager {
           'user_id' => $user['id'],
         ]);
       }
+    }
+    if ($unmanaged) {
+      $this->log->notice('Left @n active UniFi record(s) alone: not door-badged in Drupal, but not managed by this module either (no drupal-{uid} tag: staff, system or hand-made accounts).', ['@n' => $unmanaged]);
     }
   }
 
@@ -298,6 +308,10 @@ class UnifiSyncManager {
       $queue->createItem(self::reactivateItem($email, $record, $user_data));
     }
     elseif (!$should_have && $exists && !empty($record['id']) && $this->isActiveRecord($record)) {
+      if (!self::isManagedRecord($record)) {
+        $this->log->notice('Not revoking UniFi access for @e: that console record is not managed by this module (no drupal-{uid} tag).', ['@e' => $email]);
+        return;
+      }
       if (!$this->deletesAllowed()) {
         $this->log->notice('Would revoke UniFi access for @e — revocation is disabled (allow_delete).', ['@e' => $email]);
         return;
@@ -804,6 +818,26 @@ class UnifiSyncManager {
 
   /**
    * The map key under which a console record is indexed by drupal uid.
+   */
+  /**
+   * Whether this module manages the record: it carries the drupal-{uid} tag.
+   *
+   * Every record created or cleared by this module is tagged; revocation is
+   * limited to those, so staff, system and hand-made console accounts (the
+   * 2026-09-30 list: the API viewer, the shared admin, robotics) are never
+   * switched off by reconcile.
+   */
+  public static function isManagedRecord(array $record): bool {
+    foreach ((array) ($record['keys'] ?? []) as $key) {
+      if (str_starts_with((string) $key, '#uid:')) {
+        return TRUE;
+      }
+    }
+    return FALSE;
+  }
+
+  /**
+   * The index key for a record tagged drupal-{uid}.
    */
   private static function uidKey(int $uid): string {
     return '#uid:' . $uid;

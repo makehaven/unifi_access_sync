@@ -354,14 +354,16 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $this->apiMock->expects($this->once())
       ->method('listUsers')
       ->willReturn(UnifiApiResult::success(data: [
-        ['id' => 'unifi_id_123', 'email' => 'extra@example.com', 'name' => 'Extra User'],
+        // A lapsed member: managed by this module (drupal-{uid} tag).
+        ['id' => 'unifi_id_123', 'email' => 'extra@example.com', 'name' => 'Extra User', 'employee_number' => 'drupal-999'],
+        // A staff / system account made by hand in the console: never revoked.
+        ['id' => 'unifi_staff', 'email' => 'staff@example.com', 'name' => 'Staff Admin'],
       ]));
 
     $this->getSyncManager()->reconcile();
 
-    $this->assertCount(1, $this->queuedItems);
+    $this->assertCount(1, $this->queuedItems, 'only the managed record is revoked');
     $this->assertSame('deactivate', $this->queuedItems[0]['action']);
-    $this->assertSame('extra@example.com', $this->queuedItems[0]['email']);
     $this->assertSame('unifi_id_123', $this->queuedItems[0]['user_id']);
   }
 
@@ -432,7 +434,7 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->willReturnOnConsecutiveCalls(
         UnifiApiResult::success(data: []),
         UnifiApiResult::success(data: [
-          ['id' => 'u1', 'email' => 'remove@example.com'],
+          ['id' => 'u1', 'email' => 'remove@example.com', 'employee_number' => 'drupal-77'],
         ])
       );
 
@@ -999,7 +1001,9 @@ class UnifiSyncManagerTest extends KernelTestBase {
       ->willReturn(UnifiApiResult::success(data: [
         ['id' => 'u_member', 'user_email' => 'member@example.com', 'status' => 'ACTIVE'],
         ['id' => 'u_gone', 'user_email' => 'gone@example.com', 'status' => 'DEACTIVATED'],
-        ['id' => 'u_stray', 'user_email' => 'stray@example.com', 'status' => 'ACTIVE'],
+        ['id' => 'u_stray', 'user_email' => 'stray@example.com', 'status' => 'ACTIVE', 'employee_number' => 'drupal-88'],
+        // Hand-made staff/system account: active, not a member, never revoked.
+        ['id' => 'u_staff', 'user_email' => 'staff@example.com', 'status' => 'ACTIVE'],
       ]));
 
     $this->getSyncManager()->reconcile();
@@ -1333,6 +1337,19 @@ class UnifiSyncManagerTest extends KernelTestBase {
     $r = $this->getSyncManager()->syncOne('active@example.com', TRUE, TRUE);
     $this->assertSame('clear-email', $r['action']);
     $this->assertTrue($r['ok']);
+  }
+
+  /**
+   * The single-member path never revokes a hand-made console account.
+   */
+  public function testSingleSyncLeavesUnmanagedRecordAlone(): void {
+    $this->config('unifi_access_sync.settings')->set('allow_delete', TRUE)->save();
+    UnifiSyncManager::resetCache();
+    $this->apiMock->method('listUsers')->willReturn(UnifiApiResult::success(data: [
+      ['id' => 'u_admin', 'email' => 'admin@example.com', 'status' => 'ACTIVE'],
+    ]));
+    $this->getSyncManager()->syncSingleByEmail('admin@example.com', FALSE);
+    $this->assertSame([], $this->queuedItems);
   }
 
 }
